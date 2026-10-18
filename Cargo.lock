@@ -2556,6 +2556,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 [[package]]
 name = "plc-common"
 version = "0.1.0"
+source = "git+https://github.com/lovingrainbow/plc-common?tag=v0.1.0#06ebe2de3274a7112653f1d67df46857bc9ce6c9"
 dependencies = [
  "serde",
 ]
