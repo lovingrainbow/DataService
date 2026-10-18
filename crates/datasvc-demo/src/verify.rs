@@ -23,7 +23,6 @@ const EXT_TIME_TAG: &str = "plc1.D_Cyl1_ExtTime";
 enum Outcome {
     Pass,
     Fail(String),
-    Gap(&'static str),
     NotApplicable(&'static str),
 }
 
@@ -41,17 +40,13 @@ impl Report {
         self.rows.push((section, name, outcome));
     }
 
-    fn gap(&mut self, section: &'static str, name: &'static str, reason: &'static str) {
-        self.rows.push((section, name, Outcome::Gap(reason)));
-    }
-
     fn not_applicable(&mut self, section: &'static str, name: &'static str, reason: &'static str) {
         self.rows.push((section, name, Outcome::NotApplicable(reason)));
     }
 
     /// 印出報告，回傳失敗筆數
     fn print(&self) -> usize {
-        let (mut pass, mut fail, mut gap, mut na) = (0, 0, 0, 0);
+        let (mut pass, mut fail, mut na) = (0, 0, 0);
         println!("==================================================================");
         println!("  PlcDataService 規格驗證報告 (DATA_SERVICE_SPEC.md §1 ~ §9)");
         println!("==================================================================");
@@ -65,10 +60,6 @@ impl Report {
                     fail += 1;
                     println!("[FAIL] {section:<6} {name}\n         -> {reason}");
                 }
-                Outcome::Gap(reason) => {
-                    gap += 1;
-                    println!("[GAP ] {section:<6} {name}\n         -> {reason}");
-                }
                 Outcome::NotApplicable(reason) => {
                     na += 1;
                     println!("[N/A ] {section:<6} {name}\n         -> {reason}");
@@ -76,7 +67,7 @@ impl Report {
             }
         }
         println!("------------------------------------------------------------------");
-        println!("通過 {pass}  失敗 {fail}  未實作 {gap}  不適用 {na}");
+        println!("通過 {pass}  失敗 {fail}  不適用 {na}");
         fail
     }
 }
@@ -120,12 +111,7 @@ pub fn run_report() -> usize {
     report.check("§6.2", "批次寫入後以單次 Batch Read 回讀校驗 (verify_batch)", || check_batch_verify(&resolved));
     report.check("§6.3", "斷線或熔斷期間寫入立即拒絕且不排隊", || check_fail_fast(&resolved));
 
-    report.check("§7", "熔斷器保存緊湊逾時設定 50ms (僅驗證設定值)", || check_tight_timeout(&resolved));
-    report.gap(
-        "§7",
-        "緊湊逾時實際套用於通訊：RS-485 理論耗時 + 25ms",
-        "尚未實作：tight_timeout_ms 只儲存，未被驅動使用；驅動仍採用 DriverConfig.timeout_ms (預設 1000ms)",
-    );
+    report.check("§7", "緊湊逾時 50ms 套用至站點驅動的通訊逾時", || check_tight_timeout(&resolved));
     report.check("§7", "連續 3 次失敗才觸發熔斷", || check_trip_after_three(&resolved));
     report.check("§7", "熔斷時保留最後已知值並標記為 Bad", || check_stale_marking(&resolved));
     report.check("§7", "熔斷期間每 5000ms 放行一次探測", check_probe_interval);
@@ -450,7 +436,12 @@ fn check_tight_timeout(resolved: &ResolvedMachineModel) -> Result<(), String> {
     let breaker = svc.breakers.get(STATION_ID).ok_or("缺少站點熔斷器")?;
     ensure(
         breaker.tight_timeout_ms == 50,
-        format!("緊湊逾時應為 50ms，實際 {}", breaker.tight_timeout_ms),
+        format!("熔斷器緊湊逾時應為 50ms，實際 {}", breaker.tight_timeout_ms),
+    )?;
+    let driver = svc.drivers.get(STATION_ID).ok_or("找不到站點驅動")?;
+    ensure(
+        driver.config().timeout_ms == 50,
+        format!("驅動通訊逾時應為 50ms，實際 {}", driver.config().timeout_ms),
     )
 }
 

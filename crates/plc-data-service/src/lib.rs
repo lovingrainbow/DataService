@@ -227,12 +227,15 @@ impl PlcDataService {
         )
     }
 
-    pub fn attach_driver(&mut self, station_id: impl Into<String>, driver: Box<dyn PlcDriver>) {
+    /// 附掛站點驅動；驅動的通訊逾時與站點熔斷器的緊湊逾時 (§7.1) 同步
+    pub fn attach_driver(&mut self, station_id: impl Into<String>, mut driver: Box<dyn PlcDriver>) {
         let sid = station_id.into();
-        self.breakers
+        let breaker = self
+            .breakers
             .entry(sid.clone())
             .or_insert_with(|| StationCircuitBreaker::new(&sid, 50));
-        info!(station_id = %sid, "PLC driver attached");
+        driver.set_timeout_ms(breaker.tight_timeout_ms);
+        info!(station_id = %sid, tight_timeout_ms = breaker.tight_timeout_ms, "PLC driver attached");
         self.drivers.insert(sid, driver);
     }
 
@@ -765,6 +768,8 @@ mod tests {
         fail_reads: bool,
         /// 回讀時回傳偏差值 (+1)，模擬硬體與寫入值不一致
         drift: bool,
+        /// 驅動最後被設定的通訊逾時 (ms)
+        timeout_ms: u64,
     }
 
     /// 測試用驅動：記憶體點位表，可注入讀取失敗與回讀偏差
@@ -938,6 +943,10 @@ mod tests {
         fn set_simulation(&mut self, _mode: SimMode) -> Result<(), DriverError> {
             Ok(())
         }
+
+        fn set_timeout_ms(&mut self, timeout_ms: u64) {
+            self.state.lock().unwrap().timeout_ms = timeout_ms;
+        }
     }
 
     const EXT_TIME: &str = "plc1.D_Cyl1_ExtTime";
@@ -964,6 +973,13 @@ mod tests {
             }),
         );
         (svc, state)
+    }
+
+    #[test]
+    fn test_attach_driver_applies_tight_timeout() {
+        let (svc, state) = fake_service();
+        assert_eq!(svc.breakers["plc1"].tight_timeout_ms, 50);
+        assert_eq!(state.lock().unwrap().timeout_ms, 50);
     }
 
     #[test]

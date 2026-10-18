@@ -1012,6 +1012,9 @@ pub trait PlcDriver: Send {
     /// 9. DataService 背景掃描輪詢與模擬模式設定
     fn poll(&mut self, out: &Sender<TagUpdate>) -> Result<(), DriverError>;
     fn set_simulation(&mut self, mode: SimMode) -> Result<(), DriverError>;
+
+    /// 10. 設定通訊逾時 (ms)，同時套用到已建立的 Socket 讀寫逾時 (§7.1 緊湊逾時)
+    fn set_timeout_ms(&mut self, timeout_ms: u64);
 }
 
 fn now_ms() -> u64 {
@@ -1688,5 +1691,14 @@ impl PlcDriver for UniversalPlcDriver {
     fn set_simulation(&mut self, mode: SimMode) -> Result<(), DriverError> {
         self.sim_mode = mode;
         Ok(())
+    }
+
+    fn set_timeout_ms(&mut self, timeout_ms: u64) {
+        self.cfg.timeout_ms = timeout_ms;
+        if let Some(stream) = &self.stream {
+            let timeout = Duration::from_millis(timeout_ms.max(1));
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+        }
     }
 }
