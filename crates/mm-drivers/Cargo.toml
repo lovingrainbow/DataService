@@ -1,0 +1,14 @@
+[package]
+name = "mm-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-performance Industrial PLC Protocol Drivers & Testbench for ArgonGUI"
+
+[dependencies]
+machine-model = { path = "../machine-model" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-serial = "5.4"
+thiserror = { workspace = true }

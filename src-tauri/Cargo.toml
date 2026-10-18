@@ -1,0 +1,17 @@
+[package]
+name = "plc-data-service-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri 2.0 Desktop Application & IPC Commands for Industrial PLC DataService"
+
+[dependencies]
+machine-model = { path = "../crates/machine-model" }
+plc-data-service = { path = "../crates/plc-data-service" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tauri = { workspace = true }
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

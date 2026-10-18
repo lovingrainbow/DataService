@@ -1,0 +1,1510 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PlcDataService v1.0 — 工業級 PLC 資料服務層執行期測試與視覺化工作台 DEMO</title>
+  <style>
+    /* 100% 離線內嵌工業深色樣式 (ISA-101 Dark Graphite, 無外網 CDN 依賴) */
+    *, ::before, ::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft JhengHei", sans-serif;
+      background-color: #090d16;
+      color: #f1f5f9;
+      line-height: 1.45;
+    }
+    code, pre, .mono {
+      font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+    }
+    .topbar {
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 10px 18px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 30;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-badge {
+      background: linear-gradient(135deg, #059669, #0284c7);
+      color: #fff;
+      font-weight: 800;
+      padding: 6px 11px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid #334155;
+      background: #020617;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot-good { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .dot-bad { background: #f43f5e; box-shadow: 0 0 8px #f43f5e; }
+    .dot-warn { background: #f59e0b; }
+    .workspace {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 1100px) {
+      .workspace { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #e2e8f0;
+      margin: 0 0 10px 0;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
+    input, select, textarea {
+      width: 100%;
+      background: #020617;
+      border: 1px solid #334155;
+      color: #f8fafc;
+      border-radius: 7px;
+      padding: 6px 9px;
+      font-size: 12px;
+    }
+    input:focus, select:focus { outline: none; border-color: #38bdf8; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .btn {
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 6px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.15s;
+      color: #fff;
+      background: #334155;
+    }
+    .btn:hover:not(:disabled) { filter: brightness(1.15); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary { background: #4f46e5; }
+    .btn-success { background: #059669; }
+    .btn-danger { background: #e11d48; }
+    .btn-sky { background: #0284c7; }
+    .btn-amber { background: #d97706; color: #020617; font-weight: 700; }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 8px;
+    }
+    .tab-btn {
+      background: #020617;
+      color: #94a3b8;
+      border: 1px solid #1e293b;
+      padding: 7px 13px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: #064e3b;
+      color: #34d399;
+      border-color: #10b981;
+    }
+    .hidden { display: none !important; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border-bottom: 1px solid #1e293b; padding: 6px 8px; text-align: left; }
+    th { background: #020617; color: #94a3b8; font-weight: 600; }
+    .kpi-box { background: #020617; border: 1px solid #1e293b; border-radius: 9px; padding: 10px; }
+    .kpi-label { font-size: 11px; color: #94a3b8; }
+    .kpi-val { font-size: 17px; font-weight: 800; color: #38bdf8; margin-top: 2px; }
+    .q-good { color: #34d399; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; }
+    .q-bad { color: #fb7185; background: rgba(244, 63, 94, 0.15); border: 1px solid rgba(244, 63, 94, 0.5); padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; }
+    .q-uncertain { color: #fbbf24; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.5); padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; }
+    .q-stale { color: #94a3b8; background: rgba(148, 163, 184, 0.15); border: 1px solid #475569; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; }
+    .block-bar {
+      background: #020617;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .reg-cell {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 4px 7px;
+      margin: 2px;
+      border-radius: 5px;
+      font-size: 10px;
+      border: 1px solid #334155;
+    }
+    .reg-sub { background: rgba(14, 165, 233, 0.2); border-color: #0ea5e9; color: #e0f2fe; }
+    .reg-perm { background: rgba(16, 185, 129, 0.2); border-color: #10b981; color: #d1fae5; }
+    .reg-gap { background: rgba(100, 116, 139, 0.15); border-style: dashed; color: #64748b; }
+  </style>
+</head>
+<body>
+
+  <!-- Top Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-badge mono">crates/plc-data-service v1.0</span>
+      <div>
+        <div style="font-weight:700; font-size:14px;">工業級 PLC 資料服務層 (SSOT) 互動式測試與監控工作台</div>
+        <div style="font-size:11px; color:#94a3b8;">語意點位快取 (&lt;1µs) · 雙軌分層動態訂閱 (3s Cooldown) · 間隙容忍相鄰拼包 · 插隊寫入與 §9.3 四大護欄 · 單站熔斷器</div>
+      </div>
+    </div>
+    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
+      <div class="pill mono">
+        <span class="dot dot-good"></span>
+        <span id="topologyModeBadge">拓撲: In-Process Embedded (&lt;0.1µs)</span>
+      </div>
+      <button class="btn" style="padding:4px 9px; font-size:11px;" onclick="toggleTopologyMode()">🔄 切換 In-Process / Headless Daemon</button>
+      <div class="pill mono" style="color:#38bdf8;">
+        COS 推播率: <span id="cosRateText">0</span> ev/s (Zero-Waste)
+      </div>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <!-- Left Column: Two-Tier Subscription Simulator & Circuit Breaker Controls -->
+    <aside>
+      <!-- 1. Two-Tier Subscription & Viewport Simulator (§4) -->
+      <div class="card">
+        <div class="card-title">
+          <span>📡 1. 雙軌動態訂閱模擬器 (§4)</span>
+          <span class="mono" style="font-size:11px; color:#34d399;">Permanent + Viewport</span>
+        </div>
+        <div style="font-size:11px; color:#94a3b8; margin-bottom:8px;">
+          切換下方 HMI 畫面視角，觀察 <strong>引用計數 (ref_count)</strong>、離開畫面後的 <strong>3 秒退訂冷卻倒數</strong> 與 <strong>首幀 Burst 就緒防護</strong>：
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:7px; margin-bottom:10px;">
+          <div style="background:#020617; border:1px solid #1e293b; border-radius:8px; padding:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+              <span class="mono" style="font-size:11px; font-weight:700; color:#38bdf8;">🖥 客戶端 A: HMI_Main_Panel</span>
+              <button class="btn btn-danger" style="padding:2px 7px; font-size:10px;" onclick="simulateZombieCrash('HMI_Main_Panel')" title="模擬前端崩潰，測試 Zombie Auto-GC">模擬崩潰 (GC)</button>
+            </div>
+            <div class="grid-2">
+              <button id="btnView_HMI_overview" class="btn btn-success" style="font-size:11px;" onclick="toggleViewport('HMI_Main_Panel', 'view_overview')">
+                視角: 機台總覽 (ON)
+              </button>
+              <button id="btnView_HMI_manual" class="btn" style="font-size:11px;" onclick="toggleViewport('HMI_Main_Panel', 'view_manual')">
+                視角: 氣缸調機 (OFF)
+              </button>
+            </div>
+          </div>
+
+          <div style="background:#020617; border:1px solid #1e293b; border-radius:8px; padding:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+              <span class="mono" style="font-size:11px; font-weight:700; color:#a5b4fc;">📱 客戶端 B: Web_Tablet_2 (共享點位)</span>
+              <span class="mono" style="font-size:10px; color:#94a3b8;">測試 ref_count &gt; 1</span>
+            </div>
+            <div class="grid-2">
+              <button id="btnView_TAB_manual" class="btn" style="font-size:11px;" onclick="toggleViewport('Web_Tablet_2', 'view_manual')">
+                視角: 氣缸調機 (OFF)
+              </button>
+              <button id="btnView_TAB_recipe" class="btn" style="font-size:11px;" onclick="toggleViewport('Web_Tablet_2', 'view_recipe')">
+                視角: 溫控配方 (OFF)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cooldown & Burst Readiness Status Box -->
+        <div id="cooldownStatusBox" style="background:#020617; border:1px solid #1e293b; border-radius:8px; padding:8px; font-size:11px;" class="mono"></div>
+      </div>
+
+      <!-- 2. Station Circuit Breaker & Fault Tolerance (§7) -->
+      <div class="card">
+        <div class="card-title">
+          <span>🛡️ 2. 多站熔斷器與斷線容錯 (§7)</span>
+          <span class="mono" style="font-size:11px; color:#fbbf24;">Circuit Breaker</span>
+        </div>
+        <div style="font-size:11px; color:#94a3b8; margin-bottom:8px;">
+          多站 RS-485 總線中，單站連續 3 次逾時即觸發 <code>Tripped</code> 隔離（降頻為 5000ms 探測），保護同總線正常站點：
+        </div>
+        <div id="stationBreakersBox" style="display:flex; flex-direction:column; gap:8px;"></div>
+      </div>
+
+      <!-- 3. Change-of-State (COS) Event Stream (§8.2) -->
+      <div class="card">
+        <div class="card-title">
+          <span>⚡ 3. 變化推播事件流 (datasvc://tag_changed)</span>
+          <button class="btn" style="padding:2px 7px; font-size:10px;" onclick="dsState.cosEvents=[];renderCosEventStream()">清除</button>
+        </div>
+        <div id="cosEventStreamBox" class="mono" style="max-height:210px; overflow-y:auto; font-size:11px; display:flex; flex-direction:column; gap:5px;"></div>
+      </div>
+    </aside>
+
+    <!-- Right Main Area: 4 Core Functional Tabs -->
+    <main>
+      <div class="tabs">
+        <button id="tabBtn-store" class="tab-btn active" onclick="switchMainTab('store')">
+          1. 語意點位快取總覽 (TagStore &amp; Deadband)
+        </button>
+        <button id="tabBtn-coalesce" class="tab-btn" onclick="switchMainTab('coalesce')">
+          2. 智慧相鄰拼包排程器 (§5 Coalescing)
+        </button>
+        <button id="tabBtn-arbiter" class="tab-btn" onclick="switchMainTab('arbiter')">
+          3. 寫入仲裁、插隊預佔與 §9.3 四大護欄
+        </button>
+        <button id="tabBtn-api" class="tab-btn" onclick="switchMainTab('api')">
+          4. IPC / WebSocket / REST 介面契約測試器
+        </button>
+      </div>
+
+      <!-- TAB 1: Semantic TagStore Cache & Deadband -->
+      <section id="tabPanel-store" class="card">
+        <div class="card-title">
+          <span>🗄️ 語意點位即時快取 (In-Memory TagStore — 記憶體直讀 &lt; 1 µs)</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn btn-sky" style="padding:4px 9px; font-size:11px;" onclick="injectSubDeadbandJitter()">
+              〰️ 注入死區內微小抖動 (驗證 Zero-Waste 不推播)
+            </button>
+            <button class="btn btn-primary" style="padding:4px 9px; font-size:11px;" onclick="injectLargeProcessChange()">
+              📈 注入超越死區變化 (觸發 COS 推播)
+            </button>
+          </div>
+        </div>
+
+        <div class="grid-4" style="margin-bottom:12px;">
+          <div class="kpi-box">
+            <div class="kpi-label">總註冊語意 Tag 數</div>
+            <div id="kpiTotalTags" class="kpi-val mono">12</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">當前輪詢點位 (Permanent ∪ View)</div>
+            <div id="kpiPolledTags" class="kpi-val mono" style="color:#34d399;">7</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">死區攔截無謂推播次數</div>
+            <div id="kpiDeadbandFiltered" class="kpi-val mono" style="color:#a5b4fc;">0</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">快取讀取延遲 (datasvc_get_snapshot)</div>
+            <div class="kpi-val mono" style="color:#fbbf24;">0.18 µs</div>
+          </div>
+        </div>
+
+        <div style="overflow-x:auto; border:1px solid #1e293b; border-radius:8px;">
+          <table>
+            <thead>
+              <tr>
+                <th>語意點位 (Semantic Tag ID)</th>
+                <th>站點 / 實體位址 (隱藏於服務層)</th>
+                <th>訂閱軌道 (Track &amp; ref_count)</th>
+                <th>排程佇列</th>
+                <th>當前數值 (Value)</th>
+                <th>死區 (Deadband)</th>
+                <th>品質 (Quality)</th>
+                <th>版本 (Ver)</th>
+              </tr>
+            </thead>
+            <tbody id="tagStoreTbody" class="mono"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- TAB 2: Gap-Tolerant Coalescing & Multi-Rate Poller -->
+      <section id="tabPanel-coalesce" class="card hidden">
+        <div class="card-title">
+          <span>🧩 間隙容忍相鄰拼包演算法視覺化 (§5.1 Gap-Tolerant Coalescing Engine)</span>
+          <span class="mono" style="font-size:11px; color:#38bdf8;">减少 RS-485 / TCP 往返開銷</span>
+        </div>
+
+        <div class="grid-4" style="margin-bottom:12px;">
+          <div>
+            <label>通訊匯流排預設策略</label>
+            <select id="coalPresetSelect" onchange="applyCoalescingPreset(this.value)" class="mono">
+              <option value="rs485">RS-485 半雙工 (MaxGap=4, MaxBlock=64)</option>
+              <option value="tcp">Ethernet TCP (MaxGap=16, MaxBlock=200)</option>
+              <option value="no_merge">關閉拼包對照 (MaxGap=0, 逐點單讀)</option>
+            </select>
+          </div>
+          <div>
+            <label>最大容忍間隙 (MaxGap Words)</label>
+            <input id="coalMaxGap" type="number" min="0" max="64" value="4" onchange="renderAll()" class="mono" />
+          </div>
+          <div>
+            <label>單包最大長度 (MaxBlock Words)</label>
+            <input id="coalMaxBlock" type="number" min="1" max="500" value="64" onchange="renderAll()" class="mono" />
+          </div>
+          <div class="kpi-box" style="padding:6px 10px;">
+            <div class="kpi-label">每輪通訊封包數縮減</div>
+            <div id="coalSavingKpi" class="kpi-val mono" style="font-size:15px; color:#34d399;">7 包 → 3 包 (-57%)</div>
+          </div>
+        </div>
+
+        <div style="font-size:12px; color:#cbd5e1; margin-bottom:8px;">
+          <strong>即時拼包結果（僅針對目前處於 <code>Permanent</code> 或活躍/冷卻中 <code>Viewport</code> 的點位進行動態拼包）：</strong>
+          <span style="font-size:11px; color:#94a3b8;">（🟢 綠框：永久常駐軌 · 🔵 藍框：動態視角軌 · ⚪ 虛線灰框：順道跨越之未訂閱 Gap 暫存器）</span>
+        </div>
+        <div id="coalescedBlocksContainer"></div>
+      </section>
+
+      <!-- TAB 3: Preemptive Write Arbiter & §9.3 Guardrails -->
+      <section id="tabPanel-arbiter" class="card hidden">
+        <div class="card-title">
+          <span>⚖️ 寫入仲裁、插隊預佔 (Priority::Urgent) 與 MachineModel §9.3 四大護欄測試台</span>
+          <span class="mono" style="font-size:11px; color:#fbbf24;">Zero Redundant Read · Fail-Fast</span>
+        </div>
+
+        <!-- Quick Guardrail Test Scenarios -->
+        <div style="margin-bottom:12px; display:flex; flex-wrap:wrap; gap:6px;">
+          <button class="btn btn-success" onclick="presetWriteTest('valid_cmd')">
+            ✅ 測試 1: 合法手動指令寫入 (feeder.cyl1.man_ext = true)
+          </button>
+          <button class="btn btn-sky" onclick="presetWriteTest('valid_setpoint')">
+            ✅ 測試 2: 合法製程參數寫入 (feeder.cyl1.par_ext_time = 2400)
+          </button>
+          <button class="btn btn-danger" onclick="presetWriteTest('guard1_readonly')">
+            🛑 測試護欄 1: 寫入唯讀感測器 (feeder.cyl1.lim_ext → 攔截)
+          </button>
+          <button class="btn btn-danger" onclick="presetWriteTest('guard2_safety')">
+            🛑 測試護欄 2: 寫入安全急停點 (system.safety.estop → 攔截)
+          </button>
+          <button class="btn btn-danger" onclick="presetWriteTest('guard3_oob')">
+            🛑 測試護欄 3: 參數超界寫入 (par_ext_time = 45000 &gt; 30000 → 攔截)
+          </button>
+          <button class="btn btn-amber" onclick="presetWriteTest('batch_recipe')">
+            📦 測試配方批次寫入 + 單次 Batch 回讀校驗 (verify_batch = true)
+          </button>
+        </div>
+
+        <div class="grid-4" style="margin-bottom:12px;">
+          <div>
+            <label>目標語意點位 (Semantic Tag ID)</label>
+            <select id="arbWriteTag" class="mono"></select>
+          </div>
+          <div>
+            <label>寫入數值 (New Value)</label>
+            <input id="arbWriteVal" type="text" value="2400" class="mono" />
+          </div>
+          <div>
+            <label>操作員身分 (Operator ID / Client IP)</label>
+            <input id="arbOperator" type="text" value="op_01@192.168.1.50" class="mono" />
+          </div>
+          <div style="display:flex; align-items:flex-end;">
+            <button class="btn btn-primary" style="width:100%;" onclick="executeSemanticWrite()">
+              ⚡ 送出 Urgent 插隊寫入
+            </button>
+          </div>
+        </div>
+
+        <div id="writeResultBanner" style="margin-bottom:12px; padding:10px; border-radius:8px; border:1px solid #334155; background:#020617;" class="mono">
+          請點擊上方測試按鈕或執行語意寫入...
+        </div>
+
+        <div style="font-size:12px; font-weight:600; margin-bottom:6px; color:#cbd5e1;">🔒 護欄 4：安全審計日誌 (Audit Trail — 記錄所有核准與攔截之寫入請求)：</div>
+        <div style="max-height:220px; overflow-y:auto; border:1px solid #1e293b; border-radius:8px;">
+          <table>
+            <thead>
+              <tr>
+                <th>時間</th>
+                <th>操作員 / IP</th>
+                <th>語意點位 (Tag ID)</th>
+                <th>舊值 → 新值</th>
+                <th>結果</th>
+                <th>護欄與仲裁說明</th>
+              </tr>
+            </thead>
+            <tbody id="auditTrailTbody" class="mono"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- TAB 4: API Contracts Playground (IPC / WebSocket / REST) -->
+      <section id="tabPanel-api" class="card hidden">
+        <div class="card-title">
+          <span>🔌 上層應用通訊介面契約互動測試器 (§8 Tauri IPC / WebSocket / REST)</span>
+          <span class="mono" style="font-size:11px; color:#a5b4fc;">Single Hardware Ownership</span>
+        </div>
+        <div class="grid-2">
+          <div>
+            <label>選擇 API 契約命令 (§8.1)</label>
+            <select id="apiCmdSelect" onchange="populateApiSamplePayload()" class="mono" style="margin-bottom:8px;">
+              <option value="datasvc_get_snapshot">datasvc_get_snapshot (直接快取讀取 &lt;1µs)</option>
+              <option value="datasvc_enter_view">datasvc_enter_view (動態訂閱視角 + Burst 首幀)</option>
+              <option value="datasvc_leave_view">datasvc_leave_view (啟動 3 秒退訂冷卻)</option>
+              <option value="datasvc_write_tag">datasvc_write_tag (具備護欄之語意寫入)</option>
+            </select>
+            <label>Request JSON Payload</label>
+            <textarea id="apiReqTextarea" rows="7" class="mono" style="margin-bottom:8px;"></textarea>
+            <button class="btn btn-success" style="width:100%;" onclick="invokeApiContract()">▶ 呼叫 DataService API</button>
+          </div>
+          <div>
+            <label>Response JSON Payload (含版本號與納秒時間戳)</label>
+            <pre id="apiRespPre" class="mono" style="background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px; height:215px; overflow:auto; font-size:11px; color:#34d399; margin:0;"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    // =========================================================================
+    // PlcDataService v1.0 執行期核心引擎模擬與互動視覺化
+    // =========================================================================
+
+    const SEMANTIC_TAGS_CATALOG = [
+      // 軌道 1：永久常駐軌 (Permanent Track - 急停、總警報、產量計數)
+      {
+        tag_id: 'system.safety.estop',
+        station_id: 'plc1_main',
+        address: 'M220', prefix: 'M', index: 220, len: 1,
+        type: 'bool', rate: 'High (50ms)',
+        permanent: true, writable: false, safety_monitor: true,
+        min: null, max: null, deadband: 0, value: false, quality: 'Good', version: 1
+      },
+      {
+        tag_id: 'system.safety.door_closed',
+        station_id: 'plc1_main',
+        address: 'X000', prefix: 'X', index: 0, len: 1,
+        type: 'bool', rate: 'High (50ms)',
+        permanent: true, writable: false, safety_monitor: true,
+        min: null, max: null, deadband: 0, value: true, quality: 'Good', version: 1
+      },
+      {
+        tag_id: 'feeder.st1.error_jam',
+        station_id: 'plc1_main',
+        address: 'M210', prefix: 'M', index: 210, len: 1,
+        type: 'bool', rate: 'Normal (250ms)',
+        permanent: true, writable: false, safety_monitor: false,
+        min: null, max: null, deadband: 0, value: false, quality: 'Good', version: 1
+      },
+      {
+        tag_id: 'feeder.st1.total_count',
+        station_id: 'plc1_main',
+        address: 'D100', prefix: 'D', index: 100, len: 2,
+        type: 'int32', rate: 'Low (1000ms)',
+        permanent: true, writable: false, safety_monitor: false,
+        min: 0, max: 999999, deadband: 1, value: 1280, quality: 'Good', version: 1
+      },
+
+      // 軌道 2：動態視角軌 (Viewport Track - 隨畫面進入/離開動態掛載與 3 秒冷卻)
+      {
+        tag_id: 'feeder.spindle.actual_speed',
+        station_id: 'plc1_main',
+        address: 'D104', prefix: 'D', index: 104, len: 2,
+        type: 'float32', rate: 'High (50ms)',
+        permanent: false, writable: false, safety_monitor: false,
+        min: 0, max: 5000, deadband: 5.0, value: 2450.0, quality: 'Good', version: 1,
+        views: ['view_overview']
+      },
+      {
+        tag_id: 'feeder.cyl1.lim_ext',
+        station_id: 'plc1_main',
+        address: 'X002', prefix: 'X', index: 2, len: 1,
+        type: 'bool', rate: 'Normal (250ms)',
+        permanent: false, writable: false, safety_monitor: false,
+        min: null, max: null, deadband: 0, value: false, quality: 'Uncertain', version: 1,
+        views: ['view_manual']
+      },
+      {
+        tag_id: 'feeder.cyl1.man_ext',
+        station_id: 'plc1_main',
+        address: 'M100', prefix: 'M', index: 100, len: 1,
+        type: 'bool', rate: 'Normal (250ms)',
+        permanent: false, writable: true, safety_monitor: false,
+        min: null, max: null, deadband: 0, value: false, quality: 'Uncertain', version: 1,
+        views: ['view_manual']
+      },
+      {
+        tag_id: 'feeder.cyl1.at_ext',
+        station_id: 'plc1_main',
+        address: 'M102', prefix: 'M', index: 102, len: 1,
+        type: 'bool', rate: 'Normal (250ms)',
+        permanent: false, writable: false, safety_monitor: false,
+        min: null, max: null, deadband: 0, value: false, quality: 'Uncertain', version: 1,
+        views: ['view_manual']
+      },
+      {
+        tag_id: 'feeder.cyl1.par_ext_time',
+        station_id: 'plc1_main',
+        address: 'D108', prefix: 'D', index: 108, len: 1,
+        type: 'int16', rate: 'Low (1000ms)',
+        permanent: false, writable: true, safety_monitor: false,
+        min: 0, max: 30000, deadband: 0, value: 3000, quality: 'Uncertain', version: 1,
+        views: ['view_manual', 'view_recipe']
+      },
+      {
+        tag_id: 'feeder.cyl1.par_err_time',
+        station_id: 'plc1_main',
+        address: 'D111', prefix: 'D', index: 111, len: 1,
+        type: 'int16', rate: 'Low (1000ms)',
+        permanent: false, writable: true, safety_monitor: false,
+        min: 0, max: 30000, deadband: 0, value: 5000, quality: 'Uncertain', version: 1,
+        views: ['view_recipe']
+      },
+
+      // 第二站點 (plc2_heater - 用於展示多站 RS-485 單站熔斷隔離)
+      {
+        tag_id: 'heater.zone1.pv_temp',
+        station_id: 'plc2_heater',
+        address: 'D200', prefix: 'D', index: 200, len: 1,
+        type: 'float32', rate: 'Normal (250ms)',
+        permanent: true, writable: false, safety_monitor: false,
+        min: 0, max: 300, deadband: 0.5, value: 165.2, quality: 'Good', version: 1,
+        views: ['view_overview', 'view_recipe']
+      },
+      {
+        tag_id: 'heater.zone1.sv_temp',
+        station_id: 'plc2_heater',
+        address: 'D202', prefix: 'D', index: 202, len: 1,
+        type: 'float32', rate: 'Low (1000ms)',
+        permanent: false, writable: true, safety_monitor: false,
+        min: 50, max: 220, deadband: 0.1, value: 165.0, quality: 'Good', version: 1,
+        views: ['view_overview', 'view_recipe']
+      }
+    ];
+
+    const VIEW_DEFINITIONS = {
+      view_overview: ['feeder.spindle.actual_speed', 'heater.zone1.pv_temp', 'heater.zone1.sv_temp'],
+      view_manual:   ['feeder.cyl1.lim_ext', 'feeder.cyl1.man_ext', 'feeder.cyl1.at_ext', 'feeder.cyl1.par_ext_time'],
+      view_recipe:   ['feeder.cyl1.par_ext_time', 'feeder.cyl1.par_err_time', 'heater.zone1.pv_temp', 'heater.zone1.sv_temp']
+    };
+
+    const dsState = {
+      topology: 'in_process',
+      tags: JSON.parse(JSON.stringify(SEMANTIC_TAGS_CATALOG)),
+      // key: `${client}::${view}` -> { client, view, tags, coolingUntilMs: null, ready: true }
+      viewSessions: {
+        'HMI_Main_Panel::view_overview': {
+          client: 'HMI_Main_Panel',
+          view: 'view_overview',
+          tags: VIEW_DEFINITIONS.view_overview,
+          coolingUntilMs: null,
+          ready: true
+        }
+      },
+      stations: {
+        plc1_main:   { id: 'plc1_main', name: 'Station 1: 主控匯川 PLC (RS-485 #1)', state: 'Connected', fails: 0, trips: 0, timeoutMs: 45 },
+        plc2_heater: { id: 'plc2_heater', name: 'Station 2: 溫控台達 PLC (RS-485 #2)', state: 'Connected', fails: 0, trips: 0, timeoutMs: 45 }
+      },
+      deadbandFilteredCount: 0,
+      cosEvents: [],
+      auditLogs: [],
+      cosCountWindow: 0
+    };
+
+    function getTag(tagId) {
+      return dsState.tags.find(t => t.tag_id === tagId);
+    }
+
+    function toggleTopologyMode() {
+      dsState.topology = dsState.topology === 'in_process' ? 'daemon_ws' : 'in_process';
+      document.getElementById('topologyModeBadge').textContent =
+        dsState.topology === 'in_process'
+          ? '拓撲: In-Process Embedded (<0.1µs)'
+          : '拓撲: Headless Daemon (ws://127.0.0.1:8080 · 單一硬體所有權鎖定)';
+    }
+
+    // =========================================================================
+    // §4 雙軌訂閱、引用計數與 3 秒退訂冷卻邏輯
+    // =========================================================================
+    function toggleViewport(clientId, viewId) {
+      const key = `${clientId}::${viewId}`;
+      const existing = dsState.viewSessions[key];
+      const now = Date.now();
+
+      if (existing && existing.coolingUntilMs === null) {
+        // 啟動 3 秒退訂冷卻
+        existing.coolingUntilMs = now + 3000;
+        pushCosEvent('VIEW_COOLDOWN_START', `${clientId} 離開 ${viewId}，啟動 3.0s 退訂冷卻計時器`);
+      } else if (existing && existing.coolingUntilMs !== null) {
+        // 3 秒內切回，重置冷卻計時器
+        existing.coolingUntilMs = null;
+        pushCosEvent('VIEW_COOLDOWN_RESET', `${clientId} 於 3 秒內切回 ${viewId}，取消退訂、零總線重組抖動！`);
+      } else {
+        // 新掛載視角：執行首幀 Burst 優先採樣並將點位品質轉為 Good
+        const vTags = VIEW_DEFINITIONS[viewId] || [];
+        dsState.viewSessions[key] = {
+          client: clientId,
+          view: viewId,
+          tags: vTags,
+          coolingUntilMs: null,
+          ready: true
+        };
+        vTags.forEach(tid => {
+          const t = getTag(tid);
+          if (t && dsState.stations[t.station_id].state === 'Connected') {
+            updateTagWithCos(tid, t.value, 'Good');
+          }
+        });
+        pushCosEvent('VIEWPORT_BURST_READY', `${clientId} 訂閱 ${viewId}，首幀 Burst Priority 採樣完成，發送 ViewportReady！`);
+      }
+      renderAll();
+    }
+
+    function simulateZombieCrash(clientId) {
+      let removed = 0;
+      Object.keys(dsState.viewSessions).forEach(k => {
+        if (dsState.viewSessions[k].client === clientId) {
+          delete dsState.viewSessions[k];
+          removed++;
+        }
+      });
+      syncUnpolledTagQualities();
+      pushCosEvent('ZOMBIE_AUTO_GC', `偵測到 ${clientId} IPC/WS 通道斷開，自動回收 ${removed} 個動態視角訂閱！`);
+      renderAll();
+    }
+
+    function computeTagRefCounts() {
+      const counts = {};
+      Object.values(dsState.viewSessions).forEach(s => {
+        (s.tags || []).forEach(tid => {
+          counts[tid] = (counts[tid] || 0) + 1;
+        });
+      });
+      return counts;
+    }
+
+    function isTagActivelyPolled(tagObj, refCounts) {
+      return tagObj.permanent || (refCounts[tagObj.tag_id] > 0);
+    }
+
+    function syncUnpolledTagQualities() {
+      const refCounts = computeTagRefCounts();
+      dsState.tags.forEach(t => {
+        const st = dsState.stations[t.station_id];
+        if (st && st.state !== 'Connected') {
+          t.quality = 'Bad';
+        } else if (!isTagActivelyPolled(t, refCounts)) {
+          t.quality = 'Stale';
+        } else if (t.quality === 'Stale' || t.quality === 'Uncertain') {
+          t.quality = 'Good';
+        }
+      });
+    }
+
+    // =========================================================================
+    // §2 & §8.2 死區過濾 (Deadband) 與變化推播 (COS)
+    // =========================================================================
+    function updateTagWithCos(tagId, newVal, newQuality) {
+      const t = getTag(tagId);
+      if (!t) return false;
+      const qChanged = t.quality !== newQuality;
+      let valChanged = false;
+
+      if (typeof t.value === 'boolean' || typeof newVal === 'boolean') {
+        valChanged = Boolean(t.value) !== Boolean(newVal);
+      } else {
+        const diff = Math.abs(Number(newVal) - Number(t.value));
+        if (t.deadband > 0) {
+          if (diff > t.deadband) valChanged = true;
+          else if (diff > 1e-6) dsState.deadbandFilteredCount++;
+        } else {
+          valChanged = diff > 1e-6;
+        }
+      }
+
+      if (valChanged || qChanged) {
+        const oldVal = t.value;
+        t.value = newVal;
+        t.quality = newQuality;
+        t.version++;
+        dsState.cosCountWindow++;
+        pushCosEvent(
+          t.tag_id,
+          `val: ${oldVal} → ${newVal} | quality: ${newQuality} | v${t.version}`
+        );
+        return true;
+      }
+      return false;
+    }
+
+        function pushCosEvent(title, detail) {
+      dsState.cosEvents.unshift({
+        time: new Date().toLocaleTimeString(),
+        title: title,
+        detail: detail
+      });
+      if (dsState.cosEvents.length > 50) dsState.cosEvents.pop();
+      renderCosEventStream();
+    }
+
+    function renderCosEventStream() {
+      const box = document.getElementById("cosEventStreamBox");
+      if (!box) return;
+      if (dsState.cosEvents.length === 0) {
+        box.innerHTML = `<div style="color:#64748b; padding:12px; text-align:center; font-size:11px;">尚無變化事件推播 (Zero-Waste 靜默中)</div>`;
+        return;
+      }
+      box.innerHTML = dsState.cosEvents.map(ev => `
+        <div style="background:#090d16; border-left:3px solid #38bdf8; padding:5px 8px; border-radius:4px;">
+          <div style="display:flex; justify-content:space-between; color:#94a3b8; font-size:10px;">
+            <span>${escapeHtml(ev.time)}</span>
+            <span style="color:#38bdf8; font-weight:700;">${escapeHtml(ev.title)}</span>
+          </div>
+          <div style="color:#e2e8f0; font-size:11px; margin-top:2px;">${escapeHtml(ev.detail)}</div>
+        </div>
+      `).join("");
+    }
+
+    function injectSubDeadbandJitter() {
+      const t = getTag("heater.zone1.pv_temp");
+      if (t) {
+        const jitter = (Math.random() * 0.1 - 0.05);
+        const originalVal = 165.2;
+        const testVal = +(originalVal + jitter).toFixed(2);
+        const changed = updateTagWithCos(t.tag_id, testVal, t.quality);
+        if (!changed) {
+          pushCosEvent("DEADBAND_FILTERED", `點位 ${t.tag_id} 微小抖動 ${testVal} (差額 ≤ ${t.deadband}) 被死區攔截，Zero-Waste 杜絕無謂推播！`);
+        }
+      }
+      renderAll();
+    }
+
+    function injectLargeProcessChange() {
+      const t = getTag("heater.zone1.pv_temp");
+      if (t) {
+        const delta = +(Math.random() * 10 + 2.0).toFixed(1);
+        const nextVal = +(160.0 + delta).toFixed(1);
+        updateTagWithCos(t.tag_id, nextVal, t.quality);
+      }
+      const spd = getTag("feeder.spindle.actual_speed");
+      if (spd) {
+        const nextSpd = Math.round(2400 + Math.random() * 200);
+        updateTagWithCos(spd.tag_id, nextSpd, spd.quality);
+      }
+      renderAll();
+    }
+
+    // =========================================================================
+    // §5 拼包演算法與視覺化 (Gap-Tolerant Coalescing)
+    // =========================================================================
+    function applyCoalescingPreset(preset) {
+      const maxGapInput = document.getElementById("coalMaxGap");
+      const maxBlockInput = document.getElementById("coalMaxBlock");
+      if (preset === "rs485") {
+        maxGapInput.value = 4;
+        maxBlockInput.value = 64;
+      } else if (preset === "tcp") {
+        maxGapInput.value = 16;
+        maxBlockInput.value = 200;
+      } else if (preset === "no_merge") {
+        maxGapInput.value = 0;
+        maxBlockInput.value = 1;
+      }
+      renderAll();
+    }
+
+    function computeCoalescedBlocks(activeTags, maxGap, maxBlock) {
+      const groups = {};
+      activeTags.forEach(t => {
+        const key = `${t.station_id}::${t.prefix}`;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(t);
+      });
+
+      const blocks = [];
+      Object.entries(groups).forEach(([grpKey, list]) => {
+        const [stationId, prefix] = grpKey.split("::");
+        list.sort((a, b) => a.index - b.index);
+
+        let curStart = null;
+        let curEnd = 0;
+        let curMembers = [];
+        let curGaps = 0;
+
+        list.forEach(item => {
+          const rStart = item.index;
+          const rLen = Math.max(1, item.len);
+          const rEnd = rStart + rLen;
+
+          if (curStart === null) {
+            curStart = rStart;
+            curEnd = rEnd;
+            curMembers.push({ tag: item, offset: 0, len: rLen });
+            curGaps = 0;
+          } else {
+            const gap = Math.max(0, rStart - curEnd);
+            const newEnd = Math.max(curEnd, rEnd);
+            const newTotalLen = newEnd - curStart;
+
+            if (gap <= maxGap && newTotalLen <= maxBlock) {
+              curGaps += gap;
+              const offset = rStart - curStart;
+              curMembers.push({ tag: item, offset: offset, len: rLen });
+              curEnd = newEnd;
+            } else {
+              blocks.push({
+                station_id: stationId,
+                prefix: prefix,
+                start_address: `${prefix}${curStart}`,
+                start_index: curStart,
+                total_words: curEnd - curStart,
+                member_tags: curMembers,
+                gap_words_bridged: curGaps
+              });
+              curStart = rStart;
+              curEnd = rEnd;
+              curMembers = [{ tag: item, offset: 0, len: rLen }];
+              curGaps = 0;
+            }
+          }
+        });
+
+        if (curStart !== null) {
+          blocks.push({
+            station_id: stationId,
+            prefix: prefix,
+            start_address: `${prefix}${curStart}`,
+            start_index: curStart,
+            total_words: curEnd - curStart,
+            member_tags: curMembers,
+            gap_words_bridged: curGaps
+          });
+        }
+      });
+
+      return blocks;
+    }
+
+    // =========================================================================
+    // §3 & §6 寫入仲裁、四大護欄與審計日誌
+    // =========================================================================
+    function presetWriteTest(scenario) {
+      const tagSelect = document.getElementById("arbWriteTag");
+      const valInput = document.getElementById("arbWriteVal");
+
+      if (scenario === "valid_cmd") {
+        tagSelect.value = "feeder.cyl1.man_ext";
+        valInput.value = "true";
+        executeSemanticWrite();
+      } else if (scenario === "valid_setpoint") {
+        tagSelect.value = "feeder.cyl1.par_ext_time";
+        valInput.value = "2400";
+        executeSemanticWrite();
+      } else if (scenario === "guard1_readonly") {
+        tagSelect.value = "feeder.cyl1.lim_ext";
+        valInput.value = "true";
+        executeSemanticWrite();
+      } else if (scenario === "guard2_safety") {
+        tagSelect.value = "system.safety.estop";
+        valInput.value = "true";
+        executeSemanticWrite();
+      } else if (scenario === "guard3_oob") {
+        tagSelect.value = "feeder.cyl1.par_ext_time";
+        valInput.value = "45000";
+        executeSemanticWrite();
+      } else if (scenario === "batch_recipe") {
+        executeBatchRecipeWrite();
+      }
+    }
+
+    function executeSemanticWrite() {
+      const tagId = document.getElementById("arbWriteTag").value;
+      const rawVal = document.getElementById("arbWriteVal").value.trim();
+      const operator = document.getElementById("arbOperator").value.trim() || "op_01@127.0.0.1";
+      const banner = document.getElementById("writeResultBanner");
+      const t = getTag(tagId);
+
+      if (!t) {
+        banner.innerHTML = `<div style="color:#f87171;">❌ 找不到語意點位: ${tagId}</div>`;
+        return;
+      }
+
+      let parsedVal;
+      if (rawVal.toLowerCase() === "true") parsedVal = true;
+      else if (rawVal.toLowerCase() === "false") parsedVal = false;
+      else if (!isNaN(Number(rawVal))) parsedVal = Number(rawVal);
+      else parsedVal = rawVal;
+
+      const st = dsState.stations[t.station_id];
+      const isOnline = st && st.state === "Connected";
+
+      // 1. §6.3 Fail-Fast 離線阻擋
+      if (!isOnline) {
+        const rejectMsg = `[§6.3 Fail-Fast 離線阻擋] 目標站點 "${t.station_id}" 處於 ${st ? st.state : "Disconnected"} 狀態，嚴禁離線寫入排隊`;
+        recordAudit(operator, t, parsedVal, false, rejectMsg);
+        banner.innerHTML = `<div style="color:#f87171; border-left:4px solid #ef4444; padding:6px 10px; background:#7f1d1d22;">🛑 寫入拒絕: ${escapeHtml(rejectMsg)}</div>`;
+        renderAll();
+        return;
+      }
+
+      // 2. 護欄 2：safety_monitor 安全監控點位強制阻擋
+      if (t.safety_monitor) {
+        const rejectMsg = `[護欄2 安全阻擋] 點位 "${t.tag_id}" 為 safety_monitor 安全監控點，禁止寫入`;
+        recordAudit(operator, t, parsedVal, false, rejectMsg);
+        banner.innerHTML = `<div style="color:#f87171; border-left:4px solid #ef4444; padding:6px 10px; background:#7f1d1d22;">🛑 寫入拒絕: ${escapeHtml(rejectMsg)}</div>`;
+        renderAll();
+        return;
+      }
+
+      // 3. 護欄 1：唯讀點位攔截
+      if (!t.writable) {
+        const rejectMsg = `[護欄1 唯讀攔截] 點位 "${t.tag_id}" (${t.address}) 非可寫點位`;
+        recordAudit(operator, t, parsedVal, false, rejectMsg);
+        banner.innerHTML = `<div style="color:#f87171; border-left:4px solid #ef4444; padding:6px 10px; background:#7f1d1d22;">🛑 寫入拒絕: ${escapeHtml(rejectMsg)}</div>`;
+        renderAll();
+        return;
+      }
+
+      // 4. 護欄 3：數值上下限超界檢查
+      if (typeof parsedVal === "number") {
+        if (t.min !== null && t.max !== null && (parsedVal < t.min || parsedVal > t.max)) {
+          const rejectMsg = `[護欄3 超界攔截] 點位 "${t.tag_id}" 寫入值 ${parsedVal} 超出允許範圍 [${t.min} ~ ${t.max}]`;
+          recordAudit(operator, t, parsedVal, false, rejectMsg);
+          banner.innerHTML = `<div style="color:#f87171; border-left:4px solid #ef4444; padding:6px 10px; background:#7f1d1d22;">🛑 寫入拒絕: ${escapeHtml(rejectMsg)}</div>`;
+          renderAll();
+          return;
+        }
+      }
+
+      // 全部護欄通過 -> 執行寫入
+      const oldVal = t.value;
+      updateTagWithCos(t.tag_id, parsedVal, "Good");
+      const note = "Urgent Preemptive Write ACK OK (Zero Redundant Read, <1µs)";
+      recordAudit(operator, t, parsedVal, true, note, oldVal);
+
+      banner.innerHTML = `<div style="color:#34d399; border-left:4px solid #10b981; padding:6px 10px; background:#064e3b22;">
+        ✅ <strong>寫入成功 (ACK OK)</strong>：[${t.tag_id}] 已更新為 <code>${parsedVal}</code> | 耗時: 0.15 µs | 預佔排程 (Priority::Urgent)
+      </div>`;
+      renderAll();
+    }
+
+    function executeBatchRecipeWrite() {
+      const banner = document.getElementById("writeResultBanner");
+      const operator = document.getElementById("arbOperator").value.trim() || "recipe_mgr@127.0.0.1";
+      const recipe = [
+        { id: "feeder.cyl1.par_ext_time", val: 2800 },
+        { id: "feeder.cyl1.par_err_time", val: 5500 },
+        { id: "heater.zone1.sv_temp", val: 175.0 }
+      ];
+
+      recipe.forEach(item => {
+        const t = getTag(item.id);
+        if (t) {
+          const oldVal = t.value;
+          updateTagWithCos(t.tag_id, item.val, "Good");
+          recordAudit(operator, t, item.val, true, "配方批次寫入 + 單次 Batch 回讀校驗 (verify_batch: true) ACK OK", oldVal);
+        }
+      });
+
+      banner.innerHTML = `<div style="color:#38bdf8; border-left:4px solid #38bdf8; padding:6px 10px; background:#0c4a6e22;">
+        📦 <strong>配方批次寫入成功 (verify_batch: true)</strong>：共更新 3 個點位，一次性連續回讀校驗無誤！
+      </div>`;
+      renderAll();
+    }
+
+    function recordAudit(operator, tagObj, newVal, permitted, note, oldVal) {
+      dsState.auditLogs.unshift({
+        time: new Date().toLocaleTimeString(),
+        operator: operator,
+        tag_id: tagObj.tag_id,
+        oldVal: oldVal !== undefined ? oldVal : tagObj.value,
+        newVal: newVal,
+        permitted: permitted,
+        note: note
+      });
+      if (dsState.auditLogs.length > 50) dsState.auditLogs.pop();
+    }
+
+    // =========================================================================
+    // §7 單站熔斷器操作 (Circuit Breaker)
+    // =========================================================================
+    function simulateStationTimeout(stationId, trip3x = false) {
+      const st = dsState.stations[stationId];
+      if (!st) return;
+
+      if (trip3x) {
+        st.fails = 3;
+        st.state = "TrippedDegraded";
+        st.trips++;
+        dsState.tags.filter(t => t.station_id === stationId).forEach(t => {
+          t.quality = "Bad";
+          t.version++;
+        });
+        pushCosEvent("CIRCUIT_BREAKER_TRIPPED", `站點 ${stationId} 連續 3 次通訊逾時，觸發熔斷隔離！降頻為 5000ms 探測，點位標記為 Bad`);
+      } else {
+        st.fails++;
+        if (st.fails >= 3) {
+          st.state = "TrippedDegraded";
+          st.trips++;
+          dsState.tags.filter(t => t.station_id === stationId).forEach(t => {
+            t.quality = "Bad";
+            t.version++;
+          });
+          pushCosEvent("CIRCUIT_BREAKER_TRIPPED", `站點 ${stationId} 連續 3 次通訊逾時，觸發熔斷隔離！`);
+        } else {
+          pushCosEvent("STATION_TIMEOUT", `站點 ${stationId} 通訊逾時 (+1)，累計連續失敗: ${st.fails}/3`);
+        }
+      }
+      renderAll();
+    }
+
+    function resetStationBreaker(stationId) {
+      const st = dsState.stations[stationId];
+      if (!st) return;
+      st.fails = 0;
+      st.state = "Connected";
+      dsState.tags.filter(t => t.station_id === stationId).forEach(t => {
+        t.quality = "Good";
+        t.version++;
+      });
+      pushCosEvent("CIRCUIT_BREAKER_RESET", `站點 ${stationId} 連線恢復正常，熔斷隔離解除，點位品質復原為 Good`);
+      renderAll();
+    }
+
+    // =========================================================================
+    // §8 API Contracts 測試器
+    // =========================================================================
+    function populateApiSamplePayload() {
+      const cmd = document.getElementById("apiCmdSelect").value;
+      const ta = document.getElementById("apiReqTextarea");
+      if (cmd === "datasvc_get_snapshot") {
+        ta.value = JSON.stringify({
+          tags: ["feeder.spindle.actual_speed", "system.safety.estop", "heater.zone1.pv_temp"]
+        }, null, 2);
+      } else if (cmd === "datasvc_enter_view") {
+        ta.value = JSON.stringify({
+          client_id: "HMI_Main_Panel",
+          view_id: "view_manual",
+          tags: VIEW_DEFINITIONS.view_manual
+        }, null, 2);
+      } else if (cmd === "datasvc_leave_view") {
+        ta.value = JSON.stringify({
+          client_id: "HMI_Main_Panel",
+          view_id: "view_manual"
+        }, null, 2);
+      } else if (cmd === "datasvc_write_tag") {
+        ta.value = JSON.stringify({
+          tag: "feeder.cyl1.par_ext_time",
+          value: 2600,
+          operator: "op_01@192.168.1.50"
+        }, null, 2);
+      }
+    }
+
+    function invokeApiContract() {
+      const cmd = document.getElementById("apiCmdSelect").value;
+      const pre = document.getElementById("apiRespPre");
+      let req;
+      try {
+        req = JSON.parse(document.getElementById("apiReqTextarea").value);
+      } catch (e) {
+        pre.textContent = JSON.stringify({ error: "Invalid JSON Request Payload", detail: e.message }, null, 2);
+        return;
+      }
+
+      const nowNs = Date.now() * 1000000;
+      if (cmd === "datasvc_get_snapshot") {
+        const out = {};
+        const tags = req.tags && req.tags.length > 0 ? req.tags : dsState.tags.map(t => t.tag_id);
+        tags.forEach(tid => {
+          const t = getTag(tid);
+          if (t) {
+            out[tid] = {
+              tag_id: t.tag_id,
+              value: t.value,
+              quality: t.quality,
+              timestamp_ns: nowNs,
+              version: t.version
+            };
+          }
+        });
+        pre.textContent = JSON.stringify({ status: "Ok", elapsed_us: 0.18, snapshots: out }, null, 2);
+      } else if (cmd === "datasvc_enter_view") {
+        toggleViewport(req.client_id || "HMI_Main_Panel", req.view_id || "view_manual");
+        pre.textContent = JSON.stringify({
+          status: "Ok",
+          message: `Viewport ${req.view_id} entered`,
+          first_frame_ready: true,
+          burst_priority_tags_polled: req.tags ? req.tags.length : 0
+        }, null, 2);
+      } else if (cmd === "datasvc_leave_view") {
+        toggleViewport(req.client_id || "HMI_Main_Panel", req.view_id || "view_manual");
+        pre.textContent = JSON.stringify({
+          status: "Ok",
+          message: `Viewport ${req.view_id} leave initiated`,
+          cooldown_duration_ms: 3000,
+          cooldown_until: new Date(Date.now() + 3000).toISOString()
+        }, null, 2);
+      } else if (cmd === "datasvc_write_tag") {
+        const t = getTag(req.tag);
+        if (!t) {
+          pre.textContent = JSON.stringify({ status: "Err", reject_reason: `Unknown tag: ${req.tag}` }, null, 2);
+          return;
+        }
+        document.getElementById("arbWriteTag").value = req.tag;
+        document.getElementById("arbWriteVal").value = req.value;
+        document.getElementById("arbOperator").value = req.operator || "api_client";
+        executeSemanticWrite();
+        const lastAudit = dsState.auditLogs[0];
+        if (lastAudit && lastAudit.permitted) {
+          pre.textContent = JSON.stringify({
+            status: "Ok",
+            write_result: {
+              tag_id: req.tag,
+              written_value: req.value,
+              elapsed_us: 0.14,
+              preempted_polling: true,
+              audit_version: t.version
+            }
+          }, null, 2);
+        } else {
+          pre.textContent = JSON.stringify({
+            status: "Err",
+            reject_reason: lastAudit ? lastAudit.note : "Write rejected by guardrails"
+          }, null, 2);
+        }
+      }
+    }
+
+    // =========================================================================
+    // UI 切換與渲染邏輯 (Tab, Views, Breakers, Coalescing, TagStore, Audit)
+    // =========================================================================
+    function switchMainTab(tabKey) {
+      ["store", "coalesce", "arbiter", "api"].forEach(k => {
+        const btn = document.getElementById(`tabBtn-${k}`);
+        const panel = document.getElementById(`tabPanel-${k}`);
+        if (btn) btn.classList.toggle("active", k === tabKey);
+        if (panel) panel.classList.toggle("hidden", k !== tabKey);
+      });
+    }
+
+    function renderViewButtons() {
+      const refCounts = computeTagRefCounts();
+
+      const updateBtn = (btnId, clientId, viewId, label) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        const key = `${clientId}::${viewId}`;
+        const sess = dsState.viewSessions[key];
+        if (sess && sess.coolingUntilMs !== null) {
+          const rem = Math.max(0, ((sess.coolingUntilMs - Date.now()) / 1000).toFixed(1));
+          btn.className = "btn btn-amber";
+          btn.textContent = `視角: ${label} (${rem}s 冷卻)`;
+        } else if (sess) {
+          btn.className = "btn btn-success";
+          btn.textContent = `視角: ${label} (ON)`;
+        } else {
+          btn.className = "btn";
+          btn.textContent = `視角: ${label} (OFF)`;
+        }
+      };
+
+      updateBtn("btnView_HMI_overview", "HMI_Main_Panel", "view_overview", "機台總覽");
+      updateBtn("btnView_HMI_manual", "HMI_Main_Panel", "view_manual", "氣缸調機");
+      updateBtn("btnView_TAB_manual", "Web_Tablet_2", "view_manual", "氣缸調機");
+      updateBtn("btnView_TAB_recipe", "Web_Tablet_2", "view_recipe", "溫控配方");
+    }
+
+    function renderCooldownStatus() {
+      const box = document.getElementById("cooldownStatusBox");
+      if (!box) return;
+      const sessions = Object.values(dsState.viewSessions);
+      if (sessions.length === 0) {
+        box.innerHTML = `<span style="color:#64748b;">無任何活躍視角 (僅永久常駐軌輪詢中)</span>`;
+        return;
+      }
+
+      const now = Date.now();
+      const lines = sessions.map(s => {
+        if (s.coolingUntilMs !== null) {
+          const rem = Math.max(0, ((s.coolingUntilMs - now) / 1000).toFixed(1));
+          return `<div style="color:#fbbf24;">⏳ [3秒冷卻中] <strong>${s.client}</strong> 離開 <code>${s.view}</code> (剩餘 ${rem}s) — 點位鎖定不退訂</div>`;
+        } else {
+          return `<div style="color:#34d399;">🟢 [活躍中] <strong>${s.client}</strong> :: <code>${s.view}</code> (首幀 Burst Ready)</div>`;
+        }
+      });
+      box.innerHTML = lines.join("");
+    }
+
+    function renderStationBreakers() {
+      const box = document.getElementById("stationBreakersBox");
+      if (!box) return;
+      box.innerHTML = Object.values(dsState.stations).map(st => {
+        const isOnline = st.state === "Connected";
+        const badgeColor = isOnline ? "#34d399" : "#f87171";
+        const badgeBg = isOnline ? "#064e3b" : "#7f1d1d";
+        const badgeText = isOnline ? "Connected (正常通訊中)" : "TrippedDegraded (熔斷隔離 · 5000ms 探測)";
+        return `
+          <div style="background:#020617; border:1px solid #1e293b; border-radius:8px; padding:9px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <span class="mono" style="font-weight:700; font-size:12px;">${escapeHtml(st.name)}</span>
+              <span class="badge" style="background:${badgeBg}; color:${badgeColor}; font-size:10px;">${badgeText}</span>
+            </div>
+            <div style="font-size:11px; color:#94a3b8; display:flex; justify-content:space-between; margin-bottom:8px;">
+              <span>緊湊逾時: <strong>${st.timeoutMs}ms</strong></span>
+              <span>連續失敗: <strong style="color:${st.fails>0?"#fbbf24":"#cbd5e1"};">${st.fails} / 3</strong></span>
+              <span>累計熔斷: <strong>${st.trips} 次</strong></span>
+            </div>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-amber" style="padding:3px 8px; font-size:10px;" onclick="simulateStationTimeout('${st.id}', false)">
+                ⚠️ 模擬單次逾時 (+1)
+              </button>
+              <button class="btn btn-danger" style="padding:3px 8px; font-size:10px;" onclick="simulateStationTimeout('${st.id}', true)">
+                💥 模擬連續 3 次逾時 (觸發熔斷)
+              </button>
+              <button class="btn btn-success" style="padding:3px 8px; font-size:10px;" onclick="resetStationBreaker('${st.id}')">
+                🔄 恢復站點連線 (Reset)
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderTagStore() {
+      const tbody = document.getElementById("tagStoreTbody");
+      if (!tbody) return;
+      const refCounts = computeTagRefCounts();
+
+      tbody.innerHTML = dsState.tags.map(t => {
+        const isPolled = isTagActivelyPolled(t, refCounts);
+        const refC = refCounts[t.tag_id] || 0;
+
+        let trackBadge;
+        if (t.permanent) {
+          trackBadge = `<span class="badge" style="background:#064e3b; color:#34d399;">Permanent (常駐軌)</span>`;
+        } else if (refC > 0) {
+          trackBadge = `<span class="badge" style="background:#1e3a8a; color:#60a5fa;">Viewport (ref: ${refC})</span>`;
+        } else {
+          trackBadge = `<span class="badge" style="background:#334155; color:#94a3b8;">Unsubscribed (未訂閱)</span>`;
+        }
+
+        let qBadge;
+        if (t.quality === "Good") {
+          qBadge = `<span class="badge" style="background:#064e3b; color:#34d399;"><span class="dot dot-good"></span>Good</span>`;
+        } else if (t.quality === "Bad") {
+          qBadge = `<span class="badge" style="background:#7f1d1d; color:#f87171;"><span class="dot dot-bad"></span>Bad</span>`;
+        } else if (t.quality === "Uncertain") {
+          qBadge = `<span class="badge" style="background:#78350f; color:#fbbf24;"><span class="dot dot-uncertain"></span>Uncertain</span>`;
+        } else {
+          qBadge = `<span class="badge" style="background:#334155; color:#94a3b8;"><span class="dot dot-stale"></span>Stale</span>`;
+        }
+
+        const rowStyle = !isPolled ? "opacity: 0.55;" : "";
+        const valDisplay = typeof t.value === "boolean"
+          ? (t.value ? `<strong style="color:#34d399;">TRUE</strong>` : `<span style="color:#94a3b8;">FALSE</span>`)
+          : `<strong>${t.value}</strong>`;
+
+        return `
+          <tr style="${rowStyle}">
+            <td><strong>${escapeHtml(t.tag_id)}</strong></td>
+            <td><code style="color:#a5b4fc;">${escapeHtml(t.station_id)}</code> / <code>${escapeHtml(t.address)}</code></td>
+            <td>${trackBadge}</td>
+            <td><span style="font-size:11px; color:#94a3b8;">${escapeHtml(t.rate)}</span></td>
+            <td>${valDisplay}</td>
+            <td>${t.deadband > 0 ? `<code style="color:#38bdf8;">±${t.deadband}</code>` : `<span style="color:#64748b;">-</span>`}</td>
+            <td>${qBadge}</td>
+            <td><code style="color:#cbd5e1;">v${t.version}</code></td>
+          </tr>
+        `;
+      }).join("");
+
+      document.getElementById("kpiTotalTags").textContent = dsState.tags.length;
+      const polledCount = dsState.tags.filter(t => isTagActivelyPolled(t, refCounts)).length;
+      document.getElementById("kpiPolledTags").textContent = polledCount;
+      document.getElementById("kpiDeadbandFiltered").textContent = dsState.deadbandFilteredCount;
+    }
+
+    function renderCoalescedBlocks() {
+      const container = document.getElementById("coalescedBlocksContainer");
+      if (!container) return;
+
+      const refCounts = computeTagRefCounts();
+      const activeTags = dsState.tags.filter(t => isTagActivelyPolled(t, refCounts));
+
+      const maxGap = Number(document.getElementById("coalMaxGap").value) || 4;
+      const maxBlock = Number(document.getElementById("coalMaxBlock").value) || 64;
+
+      const blocks = computeCoalescedBlocks(activeTags, maxGap, maxBlock);
+
+      const savingKpi = document.getElementById("coalSavingKpi");
+      if (savingKpi) {
+        const origCount = activeTags.length;
+        const blockCount = blocks.length;
+        const savingPct = origCount > 0 ? Math.round((1 - blockCount / origCount) * 100) : 0;
+        savingKpi.textContent = `${origCount} 點位 → ${blockCount} 連續封包 (${savingPct >= 0 ? "-" : "+"}${Math.abs(savingPct)}%)`;
+      }
+
+      if (blocks.length === 0) {
+        container.innerHTML = `<div style="color:#64748b; padding:15px; text-align:center;">目前無活躍訂閱點位進行拼包</div>`;
+        return;
+      }
+
+      container.innerHTML = blocks.map((b, idx) => {
+        return `
+          <div style="background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px; margin-bottom:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; border-bottom:1px solid #1e293b; padding-bottom:6px;">
+              <div class="mono" style="font-size:12px; font-weight:700;">
+                <span style="color:#38bdf8;">[區塊 #${idx + 1}]</span>
+                <span>${b.station_id}</span>
+                <span style="color:#fbbf24;">(${b.start_address} ..= ${b.prefix}${b.start_index + b.total_words - 1})</span>
+              </div>
+              <div class="mono" style="font-size:11px;">
+                連續讀取: <strong style="color:#34d399;">${b.total_words} Words</strong>
+                | 跨越未訂閱 Gap: <strong style="color:#cbd5e1;">${b.gap_words_bridged} Words</strong>
+                | 內含點位: <strong>${b.member_tags.length} 個</strong>
+              </div>
+            </div>
+
+            <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+              ${b.member_tags.map(m => {
+                const borderCol = m.tag.permanent ? "#10b981" : "#38bdf8";
+                const bgCol = m.tag.permanent ? "#064e3b33" : "#0c4a6e33";
+                const tagTypeLabel = m.tag.permanent ? "🟢 Permanent" : "🔵 Viewport";
+                return `
+                  <div style="border:1px solid ${borderCol}; background:${bgCol}; border-radius:6px; padding:4px 8px; font-size:11px;" class="mono">
+                    <div style="font-weight:700; color:#f1f5f9;">${escapeHtml(m.tag.tag_id)}</div>
+                    <div style="font-size:10px; color:#94a3b8;">${m.tag.address} (+${m.offset}w, ${m.len}w) · ${tagTypeLabel}</div>
+                  </div>
+                `;
+              }).join("")}
+              ${b.gap_words_bridged > 0 ? `
+                <div style="border:1px dashed #64748b; background:#1e293b33; border-radius:6px; padding:4px 8px; font-size:10px; color:#94a3b8;" class="mono">
+                  ⚪ 順道跨越未訂閱暫存器 (Gap: ${b.gap_words_bridged} Words)
+                </div>
+              ` : ""}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderAuditTrail() {
+      const tbody = document.getElementById("auditTrailTbody");
+      if (!tbody) return;
+      if (dsState.auditLogs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b; padding:15px;">尚無安全寫入審計日誌記錄</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = dsState.auditLogs.map(log => {
+        const resBadge = log.permitted
+          ? `<span class="badge" style="background:#064e3b; color:#34d399;">核准 (ACK)</span>`
+          : `<span class="badge" style="background:#7f1d1d; color:#f87171;">攔截 (REJECT)</span>`;
+        return `
+          <tr>
+            <td>${escapeHtml(log.time)}</td>
+            <td><code style="color:#a5b4fc;">${escapeHtml(log.operator)}</code></td>
+            <td><strong>${escapeHtml(log.tag_id)}</strong></td>
+            <td><code>${log.oldVal !== undefined ? log.oldVal : "-"} → ${log.newVal}</code></td>
+            <td>${resBadge}</td>
+            <td style="font-size:11px; color:#cbd5e1;">${escapeHtml(log.note)}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function renderTagSelectDropdown() {
+      const select = document.getElementById("arbWriteTag");
+      if (!select || select.options.length > 0) return;
+      dsState.tags.forEach(t => {
+        const opt = document.createElement("option");
+        opt.value = t.tag_id;
+        opt.textContent = `${t.tag_id} (${t.address}, ${t.writable ? "可寫" : "唯讀"})`;
+        select.appendChild(opt);
+      });
+      select.addEventListener("change", () => {
+        const t = getTag(select.value);
+        if (t) {
+          document.getElementById("arbWriteVal").value = t.value;
+        }
+      });
+    }
+
+    function renderAll() {
+      syncUnpolledTagQualities();
+      renderViewButtons();
+      renderCooldownStatus();
+      renderStationBreakers();
+      renderTagStore();
+      renderCoalescedBlocks();
+      renderAuditTrail();
+      renderCosEventStream();
+    }
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    // =========================================================================
+    // 定時器：3秒退訂冷卻倒數檢測、COS 率更新與背景週期模擬
+    // =========================================================================
+    setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+
+      // 檢查退訂冷卻
+      Object.keys(dsState.viewSessions).forEach(k => {
+        const s = dsState.viewSessions[k];
+        if (s.coolingUntilMs !== null && now >= s.coolingUntilMs) {
+          delete dsState.viewSessions[k];
+          changed = true;
+          pushCosEvent("VIEW_UNSUBSCRIBED", `${s.client} 離開 ${s.view} 之 3 秒冷卻到期，正式退訂釋放總線頻寬！`);
+        }
+      });
+
+      if (changed) {
+        syncUnpolledTagQualities();
+        renderAll();
+      } else {
+        renderCooldownStatus();
+        renderViewButtons();
+      }
+
+      // 計算與重置 COS 推播率
+      document.getElementById("cosRateText").textContent = dsState.cosCountWindow;
+      dsState.cosCountWindow = 0;
+    }, 1000);
+
+    // 每 1500ms 模擬真實機台輕微數值變動 (僅對活躍輪詢中的點位)
+    setInterval(() => {
+      const refCounts = computeTagRefCounts();
+      const spd = getTag("feeder.spindle.actual_speed");
+      if (spd && isTagActivelyPolled(spd, refCounts) && dsState.stations[spd.station_id].state === "Connected") {
+        const jitter = (Math.random() * 8.0 - 4.0);
+        const nextSpd = Math.round(2450 + jitter);
+        updateTagWithCos(spd.tag_id, nextSpd, "Good");
+        renderTagStore();
+      }
+    }, 1500);
+
+    window.addEventListener("DOMContentLoaded", () => {
+      renderTagSelectDropdown();
+      populateApiSamplePayload();
+      pushCosEvent("SYSTEM_INIT", "PlcDataService v1.0 執行期就緒，永久常駐軌急停/警報點位載入完成。");
+      renderAll();
+    });
+  </script>
+</body>
+</html>
