@@ -6,6 +6,7 @@ license.workspace = true
 description = "Model Layer: Authoritative Unit/Tag rule engine (SC1~SC4, R1~R28, U1~U19, DS1~DS3), resolver, and IEC 61131-3 ST lowering"
 
 [dependencies]
+plc-common = { path = "../../../plc-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }

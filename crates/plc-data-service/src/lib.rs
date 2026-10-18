@@ -637,7 +637,7 @@ mod tests {
 
     fn sample_resolved_model() -> ResolvedMachineModel {
         let mf = MachineModelBuilder::new("demo_line")
-            .add_plc("plc1", PlcFamily::InovanceEasy)
+            .add_plc("plc1", PlcFamily::InovanceEasyTcp)
             .add_simple_tag("plc1.X_Cyl1_Ext_LS", "X010", "bool")
             .add_simple_tag("plc1.Y_Cyl1_Ext", "Y010", "bool")
             .add_simple_tag("plc1.M_Cyl1_ManExt", "M100", "bool")

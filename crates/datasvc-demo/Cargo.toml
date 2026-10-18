@@ -7,7 +7,7 @@ description = "Spec verification report, terminal HMI and headless daemon for Pl
 
 [dependencies]
 machine-model = { path = "../machine-model" }
-mm-drivers = { path = "../mm-drivers" }
+mm-drivers = { path = "../../../PLCDriver/crates/mm-drivers" }
 plc-data-service = { path = "../plc-data-service" }
 parking_lot.workspace = true
 serde.workspace = true

@@ -129,29 +129,15 @@ pub mod diagnostics {
 // 2. PLC 家族與軟元件位址表 (§3.1, §3.2)
 // ============================================================================
 
+pub use plc_common::family as family_table;
+
 pub mod family {
+    use super::family_table::Radix;
+    use super::family_table::Width;
     use super::*;
 
-    /// 支援的 PLC 家族 (§3.1)
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-    pub enum PlcFamily {
-        #[serde(rename = "inovance_easy")]
-        InovanceEasy,
-        #[serde(rename = "mitsubishi_fx3g")]
-        MitsubishiFx3g,
-        #[serde(rename = "mitsubishi_fx3s")]
-        MitsubishiFx3s,
-    }
-
-    impl fmt::Display for PlcFamily {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                PlcFamily::InovanceEasy => write!(f, "inovance_easy"),
-                PlcFamily::MitsubishiFx3g => write!(f, "mitsubishi_fx3g"),
-                PlcFamily::MitsubishiFx3s => write!(f, "mitsubishi_fx3s"),
-            }
-        }
-    }
+    /// PLC 家族（驅動型號），定義於 `family_table`（spec §3.3）。
+    pub use super::family_table::{ClassProfile, Family as PlcFamily, Grammar, OPAQUE_CLASS};
 
     /// 軟元件位址方向與性質分類
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +153,8 @@ pub mod family {
         DataRegister,
         /// 計時器／計數器（如 T, C）
         TimerCounter,
+        /// 結構化語法（如 `DB1.DBW0`、標籤名稱）；只檢查非空，類別未知
+        Structured,
     }
 
     impl AddressCategory {
@@ -201,63 +189,49 @@ pub mod family {
         pub canonical: String,
     }
 
-    /// 軟元件家族規格定義
-    struct DeviceRangeRule {
-        prefix: &'static str,
-        radix: u32,
-        max_index: u32,
-        category: AddressCategory,
-        allow_bit_suffix: bool,
+    /// 類別的位址分類：唯讀輸入、實體輸出（`Y`、`Q`）、其餘位元、字組。
+    fn category_of(class: &ClassProfile) -> AddressCategory {
+        if class.read_only {
+            AddressCategory::PhysicalInput
+        } else if class.width == Width::Bit && matches!(class.name, "Y" | "Q") {
+            AddressCategory::PhysicalOutput
+        } else if class.width == Width::Bit {
+            AddressCategory::InternalBit
+        } else {
+            AddressCategory::DataRegister
+        }
     }
 
-    fn rules_for_family(family: PlcFamily) -> &'static [DeviceRangeRule] {
-        const INOVANCE_RULES: &[DeviceRangeRule] = &[
-            DeviceRangeRule { prefix: "X", radix: 8, max_index: 0o777, category: AddressCategory::PhysicalInput, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "Y", radix: 8, max_index: 0o777, category: AddressCategory::PhysicalOutput, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "M", radix: 10, max_index: 7999, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "S", radix: 10, max_index: 4095, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "B", radix: 10, max_index: 32767, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "D", radix: 10, max_index: 7999, category: AddressCategory::DataRegister, allow_bit_suffix: true },
-            DeviceRangeRule { prefix: "R", radix: 10, max_index: 32767, category: AddressCategory::DataRegister, allow_bit_suffix: true },
-            DeviceRangeRule { prefix: "W", radix: 10, max_index: 32767, category: AddressCategory::DataRegister, allow_bit_suffix: true },
-            DeviceRangeRule { prefix: "T", radix: 10, max_index: 511, category: AddressCategory::TimerCounter, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "C", radix: 10, max_index: 255, category: AddressCategory::TimerCounter, allow_bit_suffix: false },
-        ];
-
-        const FX3G_RULES: &[DeviceRangeRule] = &[
-            DeviceRangeRule { prefix: "X", radix: 8, max_index: 0o377, category: AddressCategory::PhysicalInput, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "Y", radix: 8, max_index: 0o377, category: AddressCategory::PhysicalOutput, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "M", radix: 10, max_index: 7679, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "S", radix: 10, max_index: 4095, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "D", radix: 10, max_index: 7999, category: AddressCategory::DataRegister, allow_bit_suffix: true },
-            DeviceRangeRule { prefix: "R", radix: 10, max_index: 23999, category: AddressCategory::DataRegister, allow_bit_suffix: true },
-            DeviceRangeRule { prefix: "T", radix: 10, max_index: 319, category: AddressCategory::TimerCounter, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "C", radix: 10, max_index: 255, category: AddressCategory::TimerCounter, allow_bit_suffix: false },
-        ];
-
-        const FX3S_RULES: &[DeviceRangeRule] = &[
-            DeviceRangeRule { prefix: "X", radix: 8, max_index: 0o177, category: AddressCategory::PhysicalInput, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "Y", radix: 8, max_index: 0o177, category: AddressCategory::PhysicalOutput, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "M", radix: 10, max_index: 1535, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "S", radix: 10, max_index: 999, category: AddressCategory::InternalBit, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "D", radix: 10, max_index: 2999, category: AddressCategory::DataRegister, allow_bit_suffix: true },
-            DeviceRangeRule { prefix: "T", radix: 10, max_index: 137, category: AddressCategory::TimerCounter, allow_bit_suffix: false },
-            DeviceRangeRule { prefix: "C", radix: 10, max_index: 255, category: AddressCategory::TimerCounter, allow_bit_suffix: false },
-        ];
-
-        match family {
-            PlcFamily::InovanceEasy => INOVANCE_RULES,
-            PlcFamily::MitsubishiFx3g => FX3G_RULES,
-            PlcFamily::MitsubishiFx3s => FX3S_RULES,
+    fn radix_name(radix: Radix) -> &'static str {
+        match radix {
+            Radix::Octal => "八",
+            Radix::Decimal => "十",
+            Radix::Hexadecimal => "十六",
         }
     }
 
     /// 依 PLC 家族解析並驗證軟元件位址 (R8)
+    ///
+    /// 前綴表家族：前綴必須在表中，編號依該類別的進位與上限檢查。
+    /// 非空家族（`Grammar::Opaque`）：只檢查非空。
     pub fn parse_plc_address(family: PlcFamily, raw: &str) -> Result<ParsedAddress, String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err("軟元件位址不得為空".to_string());
         }
+
+        let classes = match family.grammar() {
+            Grammar::Opaque => {
+                return Ok(ParsedAddress {
+                    prefix: String::new(),
+                    index: 0,
+                    bit_offset: None,
+                    category: AddressCategory::Structured,
+                    canonical: trimmed.to_string(),
+                });
+            }
+            Grammar::Classes(classes) => classes,
+        };
 
         let alpha_len = trimmed
             .chars()
@@ -273,57 +247,64 @@ pub mod family {
             return Err(format!("位址 '{}' 缺少編號", raw));
         }
 
-        let rule = rules_for_family(family)
+        let class = classes
             .iter()
-            .find(|r| r.prefix == prefix)
+            .find(|c| c.name == prefix)
             .ok_or_else(|| format!("PLC 家族 '{}' 不支援軟元件前綴 '{}'", family, prefix))?;
+        let base = class.radix.base();
 
         let (num_part, bit_offset) = if let Some((n, b)) = rest.split_once('.') {
-            if !rule.allow_bit_suffix {
+            if !class.bit_suffix {
                 return Err(format!("軟元件 '{}' 不支援字元內位元索引 ('.bit')", prefix));
             }
-            let bit = u8::from_str_radix(b, 16)
+            let bit = b
+                .parse::<u8>()
                 .ok()
-                .filter(|&v| v < 16)
-                .ok_or_else(|| format!("位址 '{}' 的位元偏移 '{}' 必須為 0..15 (或 0..F)", raw, b))?;
+                .filter(|&v| v <= 15)
+                .ok_or_else(|| format!("位址 '{}' 的位元偏移 '{}' 必須為 0..15", raw, b))?;
             (n, Some(bit))
         } else {
             (rest, None)
         };
 
-        let index = u32::from_str_radix(num_part, rule.radix).map_err(|_| {
-            if rule.radix == 8 {
-                format!("位址 '{}' 編號 '{}' 非合法八進位數字", raw, num_part)
-            } else {
-                format!("位址 '{}' 編號 '{}' 非合法十進位數字", raw, num_part)
-            }
+        if num_part.is_empty() || !num_part.chars().all(|c| c.is_digit(base)) {
+            return Err(format!(
+                "位址 '{}' 編號 '{}' 非合法{}進位數字",
+                raw,
+                num_part,
+                radix_name(class.radix)
+            ));
+        }
+        let index = u32::from_str_radix(num_part, base).map_err(|_| {
+            format!(
+                "位址 '{}' 編號 '{}' 非合法{}進位數字",
+                raw,
+                num_part,
+                radix_name(class.radix)
+            )
         })?;
 
-        if index > rule.max_index {
+        if index > class.max {
             return Err(format!(
                 "位址 '{}' 超出家族 '{}' 的範圍上限 (最大 {})",
-                raw,
-                family,
-                if rule.radix == 8 {
-                    format!("{}{:o}", rule.prefix, rule.max_index)
-                } else {
-                    format!("{}{}", rule.prefix, rule.max_index)
-                }
+                raw, family, class.max
             ));
         }
 
-        let canonical = match (rule.radix, bit_offset) {
-            (8, None) => format!("{}{:03o}", rule.prefix, index),
-            (8, Some(b)) => format!("{}{:03o}.{:X}", rule.prefix, index, b),
-            (_, None) => format!("{}{}", rule.prefix, index),
-            (_, Some(b)) => format!("{}{}.{:X}", rule.prefix, index, b),
+        let canonical = match (class.radix, bit_offset) {
+            (Radix::Octal, None) => format!("{}{:03o}", prefix, index),
+            (Radix::Octal, Some(b)) => format!("{}{:03o}.{}", prefix, index, b),
+            (Radix::Hexadecimal, None) => format!("{}{:X}", prefix, index),
+            (Radix::Hexadecimal, Some(b)) => format!("{}{:X}.{}", prefix, index, b),
+            (Radix::Decimal, None) => format!("{}{}", prefix, index),
+            (Radix::Decimal, Some(b)) => format!("{}{}.{}", prefix, index, b),
         };
 
         Ok(ParsedAddress {
             prefix,
             index,
             bit_offset,
-            category: rule.category,
+            category: category_of(class),
             canonical,
         })
     }
@@ -337,76 +318,8 @@ pub mod datatype {
     use super::diagnostics::Diagnostic;
     use super::*;
 
-    /// 標量型別詞彙 (§3.2)
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub enum ScalarType {
-        Bool,
-        Int16,
-        Uint16,
-        Int32,
-        Uint32,
-        Int64,
-        Uint64,
-        Float32,
-        Float64,
-        /// `string:N`，N 為 1..=256
-        String(u16),
-    }
-
-    impl ScalarType {
-        pub fn parse(raw: &str) -> Result<Self, String> {
-            match raw {
-                "bool" => Ok(ScalarType::Bool),
-                "int16" => Ok(ScalarType::Int16),
-                "uint16" => Ok(ScalarType::Uint16),
-                "int32" => Ok(ScalarType::Int32),
-                "uint32" => Ok(ScalarType::Uint32),
-                "int64" => Ok(ScalarType::Int64),
-                "uint64" => Ok(ScalarType::Uint64),
-                "float32" => Ok(ScalarType::Float32),
-                "float64" => Ok(ScalarType::Float64),
-                s if s.starts_with("string:") => {
-                    let len_str = &s["string:".len()..];
-                    let n: u16 = len_str
-                        .parse()
-                        .map_err(|_| format!("無效的字串長度宣告 '{}'，必須為正整數", s))?;
-                    if !(1..=256).contains(&n) {
-                        return Err(format!("字串型別 '{}' 長度 N 必須介於 1～256 之間", s));
-                    }
-                    Ok(ScalarType::String(n))
-                }
-                other => Err(format!(
-                    "未知的標量型別 '{}'（允許：bool, int16, uint16, int32, uint32, int64, uint64, float32, float64, string:N）",
-                    other
-                )),
-            }
-        }
-
-        pub fn is_numeric(&self) -> bool {
-            !matches!(self, ScalarType::Bool | ScalarType::String(_))
-        }
-
-        pub fn is_string(&self) -> bool {
-            matches!(self, ScalarType::String(_))
-        }
-    }
-
-    impl fmt::Display for ScalarType {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                ScalarType::Bool => write!(f, "bool"),
-                ScalarType::Int16 => write!(f, "int16"),
-                ScalarType::Uint16 => write!(f, "uint16"),
-                ScalarType::Int32 => write!(f, "int32"),
-                ScalarType::Uint32 => write!(f, "uint32"),
-                ScalarType::Int64 => write!(f, "int64"),
-                ScalarType::Uint64 => write!(f, "uint64"),
-                ScalarType::Float32 => write!(f, "float32"),
-                ScalarType::Float64 => write!(f, "float64"),
-                ScalarType::String(n) => write!(f, "string:{}", n),
-            }
-        }
-    }
+    /// 標量型別詞彙 (§3.2)，定義於 `plc-common`（`string:N` 為 `Text(N)`，N 為 1..=256）
+    pub use plc_common::ScalarType;
 
     /// 完整資料型別（標量或標量陣列，明確禁止 `string:N[n]`，§3.2）
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,7 +350,7 @@ pub mod datatype {
                     ));
                 }
                 let elem = ScalarType::parse(base_str)
-                    .map_err(|msg| Diagnostic::error("SC3", path, msg))?;
+                    .map_err(|e| Diagnostic::error("SC3", path, e.to_string()))?;
                 let len: u16 = len_str.parse().map_err(|_| {
                     Diagnostic::error("SC3", path, format!("陣列長度 '{}' 必須為 1～500 的整數", len_str))
                 })?;
@@ -451,7 +364,7 @@ pub mod datatype {
                 Ok(DataType::Array { elem, len })
             } else {
                 let scalar = ScalarType::parse(s)
-                    .map_err(|msg| Diagnostic::error("SC3", path, msg))?;
+                    .map_err(|e| Diagnostic::error("SC3", path, e.to_string()))?;
                 Ok(DataType::Scalar(scalar))
             }
         }
@@ -461,7 +374,7 @@ pub mod datatype {
         }
 
         pub fn is_string_scalar(&self) -> bool {
-            matches!(self, DataType::Scalar(ScalarType::String(_)))
+            matches!(self, DataType::Scalar(ScalarType::Text(_)))
         }
     }
 
@@ -1248,23 +1161,8 @@ pub mod model {
         NC,
     }
 
-    /// 標量預設值／範圍值
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    #[serde(untagged)]
-    pub enum ScalarValue {
-        Bool(bool),
-        Number(f64),
-        Text(String),
-    }
-
-    impl ScalarValue {
-        pub fn as_f64(&self) -> Option<f64> {
-            match self {
-                ScalarValue::Number(n) => Some(*n),
-                _ => None,
-            }
-        }
-    }
+    /// 標量預設值／範圍值，定義於 `plc-common`
+    pub use plc_common::ScalarValue;
 
     /// PLC 宣告 (§3.1)
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1985,7 +1883,7 @@ pub mod validator {
                     ));
                 }
                 if let Err(msg) = ScalarType::parse(&pin_def.data_type) {
-                    diags.push(Diagnostic::error("SC3", &format!("{}.type", pin_path), msg));
+                    diags.push(Diagnostic::error("SC3", &format!("{}.type", pin_path), msg.to_string()));
                 }
             }
         }
@@ -3405,7 +3303,7 @@ pub mod lowering {
                 super::datatype::ScalarType::Uint64 => "ULINT".to_string(),
                 super::datatype::ScalarType::Float32 => "REAL".to_string(),
                 super::datatype::ScalarType::Float64 => "LREAL".to_string(),
-                super::datatype::ScalarType::String(n) => format!("STRING[{}]", n),
+                super::datatype::ScalarType::Text(n) => format!("STRING[{}]", n),
             },
             DataType::Array { elem, len } => {
                 format!("ARRAY[0..{}] OF {}", len.saturating_sub(1), to_iec_type_name(&DataType::Scalar(elem.clone())))
@@ -3971,7 +3869,7 @@ mod tests {
     fn build_valid_demo_machine() -> MachineFile {
         MachineModelBuilder::new("demo")
             .title("示範貼標上料機")
-            .add_plc("plc1", PlcFamily::InovanceEasy)
+            .add_plc("plc1", PlcFamily::InovanceEasyTcp)
             .add_simple_tag("plc1.X_Cyl1_Ext_LS", "X010", "bool")
             .add_simple_tag("plc1.Y_Cyl1_Ext", "Y010", "bool")
             .add_simple_tag("plc1.M_Cyl1_ManExt", "M100", "bool")
@@ -4015,6 +3913,19 @@ mod tests {
         assert_eq!(fnv1a_64_hex(STD_CYLINDER_DOUBLE_YAML).len(), 16);
         assert_eq!(fnv1a_64_hex(STD_STATION_LOAD_YAML).len(), 16);
         assert_eq!(fnv1a_64_hex(STD_MACHINE_CTRL_YAML).len(), 16);
+    }
+
+    #[test]
+    fn scalar_type_is_the_shared_one() {
+        let a: plc_common::ScalarType = crate::datatype::ScalarType::Int16;
+        assert_eq!(a, plc_common::ScalarType::Int16);
+    }
+
+    #[test]
+    fn string_type_cap_is_256() {
+        use super::datatype::ScalarType;
+        assert!(ScalarType::parse("string:256").is_ok());
+        assert!(ScalarType::parse("string:257").is_err());
     }
 
     #[test]

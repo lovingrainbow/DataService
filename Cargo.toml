@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/machine-model",
-    "crates/mm-drivers",
     "crates/plc-data-service",
     "crates/datasvc-demo",
     "src-tauri",
