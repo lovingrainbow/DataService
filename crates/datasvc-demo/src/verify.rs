@@ -8,10 +8,10 @@ use machine_model::model::{ScalarValue, ScanRate};
 use machine_model::resolver::ResolvedMachineModel;
 use mm_drivers::{ByteOrder, SimMode};
 use plc_data_service::PlcDataService;
-use plc_data_service::arbiter::WriteRejectReason;
+use plc_data_service::arbiter::{PreemptiveWriteCommand, WriteRejectReason};
 use plc_data_service::cache::{DataQuality, DeadbandConfig, TagRouteMeta, TagSnapshot, TagStore};
 use plc_data_service::gateway::{StationCircuitBreaker, StationHealthState};
-use plc_data_service::poller::{CoalescingPolicy, coalesce_register_blocks};
+use plc_data_service::poller::{CoalescingPolicy, MultiRateScheduler, RateTier, coalesce_register_blocks};
 use plc_data_service::subscription::SubscriptionManager;
 
 use crate::model::{STATION_ID, build_service_from, demo_resolved_model};
@@ -111,24 +111,13 @@ pub fn run_report() -> usize {
     report.check("§5.1", "相鄰位址在間隙容忍內合併為單一區塊", check_coalescing_merge);
     report.check("§5.1", "間隙超過 MaxGap 時拆分區塊", check_coalescing_gap_split);
     report.check("§5.1", "合併長度超過 MaxBlock 時拆分區塊", check_coalescing_block_limit);
-    report.gap(
-        "§5.2",
-        "多速率分群佇列 (High 50~100ms / Normal 200~500ms / Low 1000~3000ms)",
-        "尚未實作：只保留 ScanRate 欄位，沒有依速率分群的時間輪或排程器",
-    );
+    report.check("§5.2", "多速率分群：各速率層依間隔到期", check_multi_rate_gating);
+    report.check("§5.2", "輪詢讀取驅動值並依有號 int16 解碼後更新快取", || check_poll_reads_driver(&resolved));
 
     report.check("§6.1", "寫入驅動失敗時，快取保持不變", || check_driver_failure_keeps_cache(&resolved));
-    report.gap(
-        "§6.1",
-        "最高優先權 Urgent 寫入佇列",
-        "尚未實作：urgent_write_queue 欄位從未推入或取出，寫入為同步直寫",
-    );
+    report.check("§6.1", "Urgent 佇列：寫入先入列，輪詢前依 FIFO 排空", || check_urgent_queue_order(&resolved));
     report.check("§6.2", "寫入 ACK 後直接更新快取，回傳值與快取一致", || check_write_commit_cache(&resolved));
-    report.gap(
-        "§6.2",
-        "批次寫入後的 verify_batch 一次性回讀校驗",
-        "尚未實作：PreemptiveWriteCommand.verify_batch 欄位存在但未使用",
-    );
+    report.check("§6.2", "批次寫入後以單次 Batch Read 回讀校驗 (verify_batch)", || check_batch_verify(&resolved));
     report.check("§6.3", "斷線或熔斷期間寫入立即拒絕且不排隊", || check_fail_fast(&resolved));
 
     report.check("§7", "熔斷器保存緊湊逾時設定 50ms (僅驗證設定值)", || check_tight_timeout(&resolved));
@@ -533,5 +522,78 @@ fn check_deadband_cos() -> Result<(), String> {
     ensure(
         store.update_tag("T.DB", ScalarValue::Number(106.0), DataQuality::Bad).is_some(),
         "品質改變時應發出 COS",
+    )
+}
+
+// ---------------------------------------------------------------- §5.2 / §6
+
+fn write_command(tag_id: &str, value: f64, verify_batch: bool) -> PreemptiveWriteCommand {
+    PreemptiveWriteCommand {
+        tag_id: tag_id.to_string(),
+        value: ScalarValue::Number(value),
+        operator_id: OPERATOR_ID.to_string(),
+        client_ip: CLIENT_IP.to_string(),
+        verify_batch,
+    }
+}
+
+fn check_multi_rate_gating() -> Result<(), String> {
+    let mut sched = MultiRateScheduler::default();
+    ensure(sched.due_tiers(0).len() == 3, "首次輪詢時三個速率層都應到期")?;
+    ensure(sched.due_tiers(49).is_empty(), "未滿 50ms 時不應有速率層到期")?;
+    ensure(sched.due_tiers(50) == vec![RateTier::High], "滿 50ms 時只有 High 層到期")
+}
+
+fn check_poll_reads_driver(resolved: &ResolvedMachineModel) -> Result<(), String> {
+    let mut svc = build_service_from(resolved);
+    // 模擬現場變更：直接寫入驅動的記憶體，不經過服務層
+    let driver = svc.drivers.get_mut(STATION_ID).ok_or("找不到站點驅動")?;
+    driver
+        .write_single("D100", "int16", ScalarValue::Number(-5.0))
+        .map_err(|e| e.to_string())?;
+
+    svc.subscriptions.enter_viewport("verify", "poll_view", vec![EXT_TIME_TAG.to_string()], 0);
+    let report = svc.poll_cycle(0);
+    ensure(
+        report.blocks_failed == 0 && report.blocks_read >= 1,
+        format!("輪詢應成功讀取區塊，實際 {report:?}"),
+    )?;
+    ensure(
+        snapshot_value(&svc, EXT_TIME_TAG) == Some(ScalarValue::Number(-5.0)),
+        "輪詢值應為驅動中的 -5 (int16 有號解碼)",
+    )
+}
+
+fn check_urgent_queue_order(resolved: &ResolvedMachineModel) -> Result<(), String> {
+    let mut svc = build_service_from(resolved);
+    svc.subscriptions.enter_viewport("verify", "urgent_view", vec![EXT_TIME_TAG.to_string()], 0);
+    let first = svc.submit_write(write_command(EXT_TIME_TAG, 1000.0, false));
+    let second = svc.submit_write(write_command(EXT_TIME_TAG, 2000.0, false));
+    ensure(svc.urgent_write_queue.len() == 2, "寫入應先入列，尚未下發")?;
+
+    let report = svc.poll_cycle(0);
+    ensure(
+        report.writes_executed == 2,
+        format!("輪詢前應排空 2 筆寫入，實際 {}", report.writes_executed),
+    )?;
+    ensure(
+        matches!(svc.take_write_result(first), Some(Ok(_))) && matches!(svc.take_write_result(second), Some(Ok(_))),
+        "兩筆寫入都應成功",
+    )?;
+    ensure(
+        snapshot_value(&svc, EXT_TIME_TAG) == Some(ScalarValue::Number(2000.0)),
+        "依 FIFO 執行後，快取應為最後寫入的 2000",
+    )
+}
+
+fn check_batch_verify(resolved: &ResolvedMachineModel) -> Result<(), String> {
+    let mut svc = build_service_from(resolved);
+    let report = svc.write_batch(vec![write_command(EXT_TIME_TAG, 1500.0, true)]);
+    ensure(report.results.iter().all(|(_, result)| result.is_ok()), "批次寫入應全部成功")?;
+    let verification = report.verification.ok_or("標記 verify_batch 的寫入應進行校驗")?;
+    ensure(verification.checked == 1, format!("應校驗 1 個點位，實際 {}", verification.checked))?;
+    ensure(
+        verification.mismatches.is_empty() && verification.read_errors.is_empty(),
+        format!("回讀應與寫入值一致，實際 {verification:?}"),
     )
 }

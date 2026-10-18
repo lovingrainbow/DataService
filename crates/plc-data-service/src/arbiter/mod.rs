@@ -57,3 +57,35 @@ pub struct WriteResult {
     pub preempted_polling: bool,
     pub audit_version: u64,
 }
+
+/// 已排入 Urgent 佇列的寫入，附帶票號以便取回結果
+#[derive(Debug, Clone)]
+pub struct QueuedWrite {
+    pub ticket: u64,
+    pub command: PreemptiveWriteCommand,
+}
+
+/// 批次校驗中單一點位的回讀不符紀錄 (§6.2)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyMismatch {
+    pub tag_id: String,
+    pub expected: ScalarValue,
+    pub actual: ScalarValue,
+}
+
+/// 批次寫入後的一次性 Batch Read 校驗結果 (§6.2)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BatchVerification {
+    /// 實際比對的點位數
+    pub checked: usize,
+    pub mismatches: Vec<VerifyMismatch>,
+    pub read_errors: Vec<String>,
+}
+
+/// 批次寫入報告：各筆結果依提交順序排列
+#[derive(Debug, Clone)]
+pub struct BatchWriteReport {
+    pub results: Vec<(String, Result<WriteResult, WriteRejectReason>)>,
+    /// 只有標記 `verify_batch` 且寫入成功的點位才會進行校驗
+    pub verification: Option<BatchVerification>,
+}

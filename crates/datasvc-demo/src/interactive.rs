@@ -21,6 +21,7 @@ const HELP: &str = "\
   enter <VIEW> <TAG>...              進入視角並訂閱點位
   leave <VIEW>                       離開視角 (啟動 3 秒退訂冷卻)
   blocks                             顯示目前的拼包區塊
+  poll                               執行一次輪詢週期 (先排空寫入佇列)
   stats                              顯示雙軌訂閱統計 (JSON)
   station <ID> ok|fail               模擬站點通訊結果
   sim good|uncertain|readback-fail   設定驅動模擬模式
@@ -52,6 +53,7 @@ pub fn run(mut svc: PlcDataService) -> io::Result<()> {
             "enter" => enter(&mut svc, args),
             "leave" => leave(&mut svc, args),
             "blocks" => blocks(&svc),
+            "poll" => poll(&mut svc),
             "stats" => stats(&svc),
             "station" => station(&mut svc, args),
             "sim" => sim(&mut svc, args),
@@ -135,6 +137,22 @@ fn blocks(svc: &PlcDataService) {
             "  {} ({} words，間隙補讀 {}) 成員 {:?}",
             b.start_address, b.total_words, b.gap_words_bridged, b.member_tags
         );
+    }
+}
+
+fn poll(svc: &mut PlcDataService) {
+    let report = svc.poll_cycle(now_ms());
+    println!(
+        "  寫入 {} 筆 | 到期層 {:?} | 讀取 {} 區塊、略過 {}、失敗 {} | 變化 {} 筆",
+        report.writes_executed,
+        report.due_tiers,
+        report.blocks_read,
+        report.blocks_skipped,
+        report.blocks_failed,
+        report.changes.len()
+    );
+    for change in &report.changes {
+        println!("    {} = {:?}", change.tag_id, change.new_value);
     }
 }
 

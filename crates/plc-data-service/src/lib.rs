@@ -7,7 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use machine_model::datasvc::{TagOverrideEntry, evaluate_plc_data_service_writability};
 use machine_model::model::{ScanRate, ScalarValue};
 use machine_model::resolver::ResolvedMachineModel;
-use mm_drivers::{ByteOrder, PlcDriver, parse_universal_plc_address};
+use mm_drivers::{ByteOrder, PlcDriver, RandomReadItem, SingleReadResult, TagQuality, parse_universal_plc_address};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -32,11 +32,71 @@ pub mod subscription;
 // 6. PlcDataService 頂層執行期引擎 (整合快取、雙軌訂閱、拼包排程、插隊寫入與熔斷)
 // ============================================================================
 
-use arbiter::{AuditLogEntry, PreemptiveWriteCommand, WriteRejectReason, WriteResult, verify_write_guardrails};
+use arbiter::{
+    AuditLogEntry, BatchVerification, BatchWriteReport, PreemptiveWriteCommand, QueuedWrite, VerifyMismatch,
+    WriteRejectReason, WriteResult, verify_write_guardrails,
+};
 use cache::{DataQuality, DeadbandConfig, TagChangeEvent, TagRouteMeta, TagStore};
 use gateway::{StationCircuitBreaker, StationHealthState};
-use poller::{CoalescedReadBlock, CoalescingPolicy, coalesce_register_blocks};
+use poller::{CoalescedReadBlock, CoalescingPolicy, MultiRateScheduler, PollReport, RateTier, coalesce_register_blocks};
 use subscription::SubscriptionManager;
+
+/// 一次輪詢讀到的點位值與品質
+type PollValue = (String, ScalarValue, DataQuality);
+
+/// 拼包區塊成員的路由資訊（讀取時使用）
+struct MemberRoute {
+    tag_id: String,
+    /// 成員在區塊內的相對偏移（字或位元）
+    offset: u16,
+    address: String,
+    data_type: String,
+    word_len: u16,
+}
+
+/// 單一拼包區塊的讀取結果
+enum BlockOutcome {
+    Read(Vec<TagChangeEvent>),
+    Skipped,
+    Failed,
+}
+
+/// 連續讀取的逐字（或逐位元）值依成員偏移切回各點位；`int16` 以有號數解讀
+fn decode_coalesced(members: &[MemberRoute], values: &[ScalarValue]) -> Result<Vec<(String, ScalarValue)>, String> {
+    members
+        .iter()
+        .map(|m| -> Result<(String, ScalarValue), String> {
+            let raw = values
+                .get(usize::from(m.offset))
+                .ok_or_else(|| format!("點位 {} 缺少回傳值", m.tag_id))?;
+            let value = match (raw, m.data_type.as_str()) {
+                (ScalarValue::Number(n), "int16") => ScalarValue::Number(f64::from(*n as u16 as i16)),
+                (other, _) => other.clone(),
+            };
+            Ok((m.tag_id.clone(), value))
+        })
+        .collect()
+}
+
+/// 隨機讀取的結果依序對應到成員；項目數不符視為讀取失敗
+fn decode_random(members: &[MemberRoute], items: &[SingleReadResult]) -> Result<Vec<PollValue>, String> {
+    if members.len() != items.len() {
+        return Err(format!("回讀項目數 {} 與請求 {} 不符", items.len(), members.len()));
+    }
+    Ok(members
+        .iter()
+        .zip(items)
+        .map(|(m, item)| (m.tag_id.clone(), item.value.clone(), quality_from_driver(item.quality)))
+        .collect())
+}
+
+fn quality_from_driver(quality: TagQuality) -> DataQuality {
+    match quality {
+        TagQuality::Good => DataQuality::Good,
+        TagQuality::Uncertain => DataQuality::Uncertain,
+        TagQuality::Bad => DataQuality::Bad,
+    }
+}
 
 pub struct PlcDataService {
     pub store: TagStore,
@@ -44,8 +104,12 @@ pub struct PlcDataService {
     pub coalescing_policy: CoalescingPolicy,
     pub drivers: BTreeMap<String, Box<dyn PlcDriver>>,
     pub breakers: BTreeMap<String, StationCircuitBreaker>,
-    pub urgent_write_queue: VecDeque<PreemptiveWriteCommand>,
+    /// §6.1 Urgent 寫入佇列 (FIFO)，由 `drain_urgent_writes` 或 `poll_cycle` 排空
+    pub urgent_write_queue: VecDeque<QueuedWrite>,
     pub audit_trail: VecDeque<AuditLogEntry>,
+    completed_writes: BTreeMap<u64, Result<WriteResult, WriteRejectReason>>,
+    next_ticket: u64,
+    scheduler: MultiRateScheduler,
 }
 
 impl PlcDataService {
@@ -154,6 +218,9 @@ impl PlcDataService {
                 drivers: BTreeMap::new(),
                 breakers,
                 urgent_write_queue: VecDeque::new(),
+                completed_writes: BTreeMap::new(),
+                next_ticket: 1,
+                scheduler: MultiRateScheduler::default(),
                 audit_trail: VecDeque::new(),
             },
             rx,
@@ -179,7 +246,31 @@ impl PlcDataService {
         coalesce_register_blocks(&active_routes, self.coalescing_policy)
     }
 
-    /// §6.1 & §3.2 執行具備四大護欄與插隊預佔之語意寫入 (`datasvc_write_tag`)
+    /// §6.1 將寫入請求排入 Urgent 佇列並回傳票號；實際下發於 `drain_urgent_writes` 時執行
+    pub fn submit_write(&mut self, command: PreemptiveWriteCommand) -> u64 {
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        self.urgent_write_queue.push_back(QueuedWrite { ticket, command });
+        ticket
+    }
+
+    /// §6.1 依 FIFO 排空 Urgent 佇列；每筆結果保存於票號下，回傳執行筆數
+    pub fn drain_urgent_writes(&mut self) -> usize {
+        let mut executed = 0;
+        while let Some(QueuedWrite { ticket, command }) = self.urgent_write_queue.pop_front() {
+            let result = self.execute_write(command);
+            self.completed_writes.insert(ticket, result);
+            executed += 1;
+        }
+        executed
+    }
+
+    /// 取回票號對應的寫入結果（取回後即移除）
+    pub fn take_write_result(&mut self, ticket: u64) -> Option<Result<WriteResult, WriteRejectReason>> {
+        self.completed_writes.remove(&ticket)
+    }
+
+    /// §6.1 & §3.2 執行具備四大護欄與插隊預佔之語意寫入 (`datasvc_write_tag`)：入列後立即排空
     pub fn write_tag(
         &mut self,
         tag_id: &str,
@@ -187,6 +278,24 @@ impl PlcDataService {
         operator_id: &str,
         client_ip: &str,
     ) -> Result<WriteResult, WriteRejectReason> {
+        let ticket = self.submit_write(PreemptiveWriteCommand {
+            tag_id: tag_id.to_string(),
+            value,
+            operator_id: operator_id.to_string(),
+            client_ip: client_ip.to_string(),
+            verify_batch: false,
+        });
+        self.drain_urgent_writes();
+        self.take_write_result(ticket)
+            .unwrap_or_else(|| Err(WriteRejectReason::DriverError("寫入結果遺失".into())))
+    }
+
+    /// §6.1 & §3.2 單筆寫入的實際執行：護欄、驅動下發、快取更新與審計 (由佇列排空時呼叫)
+    fn execute_write(&mut self, cmd: PreemptiveWriteCommand) -> Result<WriteResult, WriteRejectReason> {
+        let tag_id = cmd.tag_id.as_str();
+        let operator_id = cmd.operator_id.as_str();
+        let client_ip = cmd.client_ip.as_str();
+        let value = cmd.value;
         let t0 = Instant::now();
         let route = self
             .store
@@ -287,6 +396,211 @@ impl PlcDataService {
         }
         breaker.state
     }
+
+    /// §5.2 只拼包指定速率層的活躍點位
+    pub fn compute_blocks_for_tier(&self, tier: RateTier) -> Vec<CoalescedReadBlock> {
+        let active_tags = self.subscriptions.active_polled_tags();
+        let routes: Vec<TagRouteMeta> = active_tags
+            .iter()
+            .filter_map(|tid| self.store.get_route(tid).cloned())
+            .filter(|route| RateTier::from_scan_rate(route.scan_rate.clone()) == tier)
+            .collect();
+        coalesce_register_blocks(&routes, self.coalescing_policy)
+    }
+
+    /// 單次輪詢週期：先排空 Urgent 寫入（寫入優先於讀取），再依到期的速率層讀取各站區塊 (§5.2 & §6.1)
+    pub fn poll_cycle(&mut self, now_ms: u64) -> PollReport {
+        let writes_executed = self.drain_urgent_writes();
+        let due = self.scheduler.due_tiers(now_ms);
+        let mut report = PollReport {
+            writes_executed,
+            due_tiers: due.clone(),
+            ..PollReport::default()
+        };
+        for tier in due {
+            for block in self.compute_blocks_for_tier(tier) {
+                match self.poll_block(&block, now_ms) {
+                    BlockOutcome::Read(changes) => {
+                        report.blocks_read += 1;
+                        report.changes.extend(changes);
+                    }
+                    BlockOutcome::Skipped => report.blocks_skipped += 1,
+                    BlockOutcome::Failed => report.blocks_failed += 1,
+                }
+            }
+        }
+        report
+    }
+
+    /// 讀取單一拼包區塊並更新快取。站點熔斷期間略過；讀取失敗時交由熔斷器計數
+    fn poll_block(&mut self, block: &CoalescedReadBlock, now_ms: u64) -> BlockOutcome {
+        let station = block.station_id.as_str();
+        let allowed = self
+            .breakers
+            .get_mut(station)
+            .map_or(true, |breaker| breaker.should_allow_poll(now_ms));
+        if !allowed {
+            return BlockOutcome::Skipped;
+        }
+
+        let members: Vec<MemberRoute> = block
+            .member_tags
+            .iter()
+            .filter_map(|(tag_id, offset, _)| {
+                self.store.get_route(tag_id).map(|route| MemberRoute {
+                    tag_id: tag_id.clone(),
+                    offset: *offset,
+                    address: route.register_address.clone(),
+                    data_type: route.data_type.clone(),
+                    word_len: route.word_len,
+                })
+            })
+            .collect();
+        let all_single_word = members.iter().all(|m| m.word_len == 1);
+        let all_bits = members.iter().all(|m| m.data_type == "bool");
+        let all_words = members.iter().all(|m| m.data_type != "bool");
+
+        // 單字元點位走連續區塊讀取；混合型別或多字元點位改由驅動逐點解碼
+        let read: Result<Vec<PollValue>, String> = {
+            let Some(driver) = self.drivers.get_mut(station) else {
+                return BlockOutcome::Skipped;
+            };
+            if all_single_word && (all_bits || all_words) {
+                let data_type = if all_bits { "bool" } else { "word" };
+                driver
+                    .read_continuous(&block.start_address, block.total_words, data_type)
+                    .map_err(|e| e.to_string())
+                    .and_then(|res| decode_coalesced(&members, &res.values))
+                    .map(|values| {
+                        values
+                            .into_iter()
+                            .map(|(tag, value)| (tag, value, DataQuality::Good))
+                            .collect()
+                    })
+            } else {
+                let items: Vec<RandomReadItem> = members
+                    .iter()
+                    .map(|m| RandomReadItem {
+                        address: m.address.clone(),
+                        data_type: m.data_type.clone(),
+                    })
+                    .collect();
+                driver
+                    .read_random(&items)
+                    .map_err(|e| e.to_string())
+                    .and_then(|res| decode_random(&members, &res.items))
+            }
+        };
+
+        match read {
+            Ok(values) => {
+                if let Some(breaker) = self.breakers.get_mut(station) {
+                    breaker.record_success();
+                }
+                let changes = values
+                    .into_iter()
+                    .filter_map(|(tag, value, quality)| self.store.update_tag(&tag, value, quality))
+                    .collect();
+                BlockOutcome::Read(changes)
+            }
+            Err(reason) => {
+                warn!(station_id = station, start = %block.start_address, error = %reason, "block read failed");
+                self.report_station_comm_result(station, false, now_ms);
+                BlockOutcome::Failed
+            }
+        }
+    }
+
+    /// §6.2 批次寫入：全部依序經 Urgent 佇列下發；標記 `verify_batch` 且寫入成功的點位，於全批完成後以單次 Batch Read 校驗
+    pub fn write_batch(&mut self, commands: Vec<PreemptiveWriteCommand>) -> BatchWriteReport {
+        let mut submitted = Vec::with_capacity(commands.len());
+        for command in commands {
+            let (tag_id, verify) = (command.tag_id.clone(), command.verify_batch);
+            let ticket = self.submit_write(command);
+            submitted.push((tag_id, ticket, verify));
+        }
+        self.drain_urgent_writes();
+
+        let mut results = Vec::with_capacity(submitted.len());
+        let mut to_verify = Vec::new();
+        for (tag_id, ticket, verify) in submitted {
+            let result = self
+                .take_write_result(ticket)
+                .unwrap_or_else(|| Err(WriteRejectReason::DriverError("寫入結果遺失".into())));
+            if let (true, Ok(written)) = (verify, &result) {
+                to_verify.push((tag_id.clone(), written.written_value.clone()));
+            }
+            results.push((tag_id, result));
+        }
+
+        let verification = if to_verify.is_empty() {
+            None
+        } else {
+            Some(self.verify_readback(&to_verify))
+        };
+        BatchWriteReport { results, verification }
+    }
+
+    /// §6.2 批次校驗：每站以一次隨機讀取回讀；回讀值與寫入值不符時，快取更新為實際值
+    fn verify_readback(&mut self, written: &[(String, ScalarValue)]) -> BatchVerification {
+        let mut verification = BatchVerification::default();
+
+        let mut by_station: BTreeMap<String, Vec<(String, String, String, ScalarValue)>> = BTreeMap::new();
+        for (tag_id, expected) in written {
+            if let Some(route) = self.store.get_route(tag_id) {
+                by_station.entry(route.station_id.clone()).or_default().push((
+                    tag_id.clone(),
+                    route.register_address.clone(),
+                    route.data_type.clone(),
+                    expected.clone(),
+                ));
+            }
+        }
+
+        for (station, entries) in by_station {
+            let items: Vec<RandomReadItem> = entries
+                .iter()
+                .map(|(_, address, data_type, _)| RandomReadItem {
+                    address: address.clone(),
+                    data_type: data_type.clone(),
+                })
+                .collect();
+            let read = match self.drivers.get_mut(&station) {
+                Some(driver) => driver.read_random(&items).map_err(|e| e.to_string()),
+                None => Err(format!("站點 {station} 沒有附掛驅動")),
+            };
+            match read {
+                Ok(res) if res.items.len() == entries.len() => {
+                    for ((tag_id, _, _, expected), item) in entries.iter().zip(&res.items) {
+                        verification.checked += 1;
+                        if item.value != *expected {
+                            verification.mismatches.push(VerifyMismatch {
+                                tag_id: tag_id.clone(),
+                                expected: expected.clone(),
+                                actual: item.value.clone(),
+                            });
+                        }
+                        self.store.update_tag(tag_id, item.value.clone(), DataQuality::Good);
+                    }
+                }
+                Ok(res) => {
+                    verification.read_errors.push(format!(
+                        "站點 {station} 回讀項目數 {} 與請求 {} 不符",
+                        res.items.len(),
+                        entries.len()
+                    ));
+                    self.report_station_comm_result(&station, false, now_ms());
+                }
+                Err(reason) => {
+                    verification
+                        .read_errors
+                        .push(format!("站點 {station} 回讀失敗: {reason}"));
+                    self.report_station_comm_result(&station, false, now_ms());
+                }
+            }
+        }
+        verification
+    }
 }
 
 // ============================================================================
@@ -300,6 +614,11 @@ mod tests {
     use machine_model::model::{MachineModelBuilder, UnitInstanceBuilder};
     use machine_model::resolver::resolve_machine_model;
     use machine_model::unit_type::TypeCatalog;
+    use mm_drivers::{
+        ContinuousReadResult, DriverConfig, DriverError, DriverTrace, LatencyReport, RandomReadResult, RandomWriteItem,
+        SimMode, StressTestConfig, StressTestReport, TagUpdate, WriteAck,
+    };
+    use std::sync::{Arc, Mutex as StdMutex};
 
     fn sample_resolved_model() -> ResolvedMachineModel {
         let mf = MachineModelBuilder::new("demo_line")
@@ -433,5 +752,301 @@ mod tests {
 
         let res_offline = svc.write_tag("plc1.D_Cyl1_ExtTime", ScalarValue::Number(2000.0), "op1", "127.0.0.1");
         assert!(matches!(res_offline, Err(WriteRejectReason::DeviceOfflineError { .. })));
+    }
+
+    // ------------------------------------------------------------------
+    // GAP 1-3：多速率排程、Urgent 寫入佇列與批次回讀校驗
+    // ------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct FakeState {
+        /// 以位址為鍵的記憶體點位表，例如 "D100"
+        words: BTreeMap<String, ScalarValue>,
+        fail_reads: bool,
+        /// 回讀時回傳偏差值 (+1)，模擬硬體與寫入值不一致
+        drift: bool,
+    }
+
+    /// 測試用驅動：記憶體點位表，可注入讀取失敗與回讀偏差
+    struct FakeDriver {
+        cfg: DriverConfig,
+        state: Arc<StdMutex<FakeState>>,
+    }
+
+    fn fake_trace() -> DriverTrace {
+        DriverTrace {
+            elapsed_us: 0,
+            tx_hex: String::new(),
+            rx_hex: String::new(),
+        }
+    }
+
+    fn injected_failure() -> DriverError {
+        DriverError::Disconnected("測試注入的通訊失敗".into())
+    }
+
+    fn stored_value(state: &FakeState, address: &str) -> ScalarValue {
+        state.words.get(address).cloned().unwrap_or(ScalarValue::Number(0.0))
+    }
+
+    /// 16 位元字的無號表示（有號值以二補數表示）
+    fn as_word(value: &ScalarValue) -> f64 {
+        match value {
+            ScalarValue::Number(n) => f64::from(*n as i64 as i16 as u16),
+            ScalarValue::Bool(b) => f64::from(u8::from(*b)),
+            ScalarValue::Text(_) => 0.0,
+        }
+    }
+
+    fn as_bit(value: &ScalarValue) -> bool {
+        match value {
+            ScalarValue::Bool(b) => *b,
+            ScalarValue::Number(n) => *n != 0.0,
+            ScalarValue::Text(_) => false,
+        }
+    }
+
+    fn drifted(value: ScalarValue) -> ScalarValue {
+        match value {
+            ScalarValue::Number(n) => ScalarValue::Number(n + 1.0),
+            ScalarValue::Bool(b) => ScalarValue::Bool(!b),
+            other => other,
+        }
+    }
+
+    impl PlcDriver for FakeDriver {
+        fn config(&self) -> &DriverConfig {
+            &self.cfg
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        fn connect(&mut self, cfg: DriverConfig) -> Result<DriverTrace, DriverError> {
+            self.cfg = cfg;
+            Ok(fake_trace())
+        }
+
+        fn disconnect(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn read_single(&mut self, address: &str, data_type: &str) -> Result<SingleReadResult, DriverError> {
+            let items = [RandomReadItem {
+                address: address.into(),
+                data_type: data_type.into(),
+            }];
+            let res = self.read_random(&items)?;
+            res.items.into_iter().next().ok_or_else(injected_failure)
+        }
+
+        fn write_single(&mut self, address: &str, _data_type: &str, value: ScalarValue) -> Result<WriteAck, DriverError> {
+            self.state.lock().unwrap().words.insert(address.to_string(), value.clone());
+            Ok(WriteAck {
+                address: address.to_string(),
+                written_value: value.clone(),
+                readback_value: value,
+                readback_matched: true,
+                timestamp_ms: 0,
+                trace: fake_trace(),
+            })
+        }
+
+        fn read_continuous(
+            &mut self,
+            start_address: &str,
+            length: u16,
+            data_type: &str,
+        ) -> Result<ContinuousReadResult, DriverError> {
+            let guard = self.state.lock().unwrap();
+            if guard.fail_reads {
+                return Err(injected_failure());
+            }
+            let (prefix, start, _, _) = parse_universal_plc_address(start_address)?;
+            let values = (0..u32::from(length))
+                .map(|i| {
+                    let stored = stored_value(&guard, &format!("{prefix}{}", start + i));
+                    if data_type == "bool" {
+                        ScalarValue::Bool(as_bit(&stored))
+                    } else {
+                        ScalarValue::Number(as_word(&stored))
+                    }
+                })
+                .collect();
+            Ok(ContinuousReadResult {
+                start_address: start_address.to_string(),
+                length,
+                data_type: data_type.to_string(),
+                values,
+                raw_bytes_hex: String::new(),
+                trace: fake_trace(),
+            })
+        }
+
+        fn write_continuous(
+            &mut self,
+            _start_address: &str,
+            _data_type: &str,
+            _values: &[ScalarValue],
+        ) -> Result<WriteAck, DriverError> {
+            Err(DriverError::ProtocolError("測試驅動不支援連續寫入".into()))
+        }
+
+        fn read_random(&mut self, items: &[RandomReadItem]) -> Result<RandomReadResult, DriverError> {
+            let guard = self.state.lock().unwrap();
+            if guard.fail_reads {
+                return Err(injected_failure());
+            }
+            let out = items
+                .iter()
+                .map(|item| {
+                    let stored = stored_value(&guard, &item.address);
+                    SingleReadResult {
+                        address: item.address.clone(),
+                        data_type: item.data_type.clone(),
+                        value: if guard.drift { drifted(stored) } else { stored },
+                        quality: TagQuality::Good,
+                        trace: fake_trace(),
+                    }
+                })
+                .collect();
+            Ok(RandomReadResult {
+                items: out,
+                total_elapsed_us: 0,
+                tx_hex: String::new(),
+                rx_hex: String::new(),
+            })
+        }
+
+        fn write_random(&mut self, _items: &[RandomWriteItem]) -> Result<Vec<WriteAck>, DriverError> {
+            Err(DriverError::ProtocolError("測試驅動不支援隨機寫入".into()))
+        }
+
+        fn ping_latency(&mut self, _address: &str, _rounds: u32) -> Result<LatencyReport, DriverError> {
+            Err(DriverError::ProtocolError("測試驅動不支援延遲量測".into()))
+        }
+
+        fn run_stress_test(&mut self, _stress_cfg: &StressTestConfig) -> Result<StressTestReport, DriverError> {
+            Err(DriverError::ProtocolError("測試驅動不支援壓力測試".into()))
+        }
+
+        fn poll(&mut self, _out: &tokio::sync::mpsc::Sender<TagUpdate>) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn set_simulation(&mut self, _mode: SimMode) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    const EXT_TIME: &str = "plc1.D_Cyl1_ExtTime";
+
+    fn write_cmd(tag_id: &str, value: f64, verify_batch: bool) -> PreemptiveWriteCommand {
+        PreemptiveWriteCommand {
+            tag_id: tag_id.to_string(),
+            value: ScalarValue::Number(value),
+            operator_id: "op1".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            verify_batch,
+        }
+    }
+
+    fn fake_service() -> (PlcDataService, Arc<StdMutex<FakeState>>) {
+        let resolved = sample_resolved_model();
+        let (mut svc, _rx) = PlcDataService::from_resolved_model(&resolved, &[], CoalescingPolicy::rs485_default());
+        let state = Arc::new(StdMutex::new(FakeState::default()));
+        svc.attach_driver(
+            "plc1",
+            Box::new(FakeDriver {
+                cfg: DriverConfig::default(),
+                state: Arc::clone(&state),
+            }),
+        );
+        (svc, state)
+    }
+
+    #[test]
+    fn test_multi_rate_scheduler_intervals() {
+        let mut sched = MultiRateScheduler::default();
+        assert_eq!(sched.due_tiers(0), vec![RateTier::High, RateTier::Normal, RateTier::Low]);
+        assert!(sched.due_tiers(49).is_empty());
+        assert_eq!(sched.due_tiers(50), vec![RateTier::High]);
+        assert_eq!(sched.due_tiers(250), vec![RateTier::High, RateTier::Normal]);
+        assert_eq!(sched.due_tiers(1000), vec![RateTier::High, RateTier::Normal, RateTier::Low]);
+    }
+
+    #[test]
+    fn test_poll_reads_subscribed_tag_with_sign_decoding() {
+        let (mut svc, state) = fake_service();
+        state.lock().unwrap().words.insert("D100".into(), ScalarValue::Number(-5.0));
+        svc.subscriptions.enter_viewport("c", "v", vec![EXT_TIME.into()], 0);
+
+        let report = svc.poll_cycle(0);
+        assert_eq!(report.blocks_failed, 0);
+        assert!(report.blocks_read >= 1);
+        let snap = svc.store.get_snapshots(&[EXT_TIME.to_string()]).remove(EXT_TIME).unwrap();
+        assert_eq!(snap.value, ScalarValue::Number(-5.0));
+    }
+
+    #[test]
+    fn test_urgent_queue_drains_fifo_before_polling() {
+        let (mut svc, state) = fake_service();
+        let first = svc.submit_write(write_cmd(EXT_TIME, 1000.0, false));
+        let second = svc.submit_write(write_cmd(EXT_TIME, 2000.0, false));
+        assert_eq!(svc.urgent_write_queue.len(), 2);
+
+        svc.subscriptions.enter_viewport("c", "v", vec![EXT_TIME.into()], 0);
+        let report = svc.poll_cycle(0);
+        assert_eq!(report.writes_executed, 2);
+        assert!(svc.urgent_write_queue.is_empty());
+        assert!(matches!(svc.take_write_result(first), Some(Ok(_))));
+        assert!(matches!(svc.take_write_result(second), Some(Ok(_))));
+
+        // 寫入先於讀取：本輪讀到的是最後寫入的 2000
+        assert_eq!(state.lock().unwrap().words.get("D100"), Some(&ScalarValue::Number(2000.0)));
+        let snap = svc.store.get_snapshots(&[EXT_TIME.to_string()]).remove(EXT_TIME).unwrap();
+        assert_eq!(snap.value, ScalarValue::Number(2000.0));
+    }
+
+    #[test]
+    fn test_poll_failures_trip_breaker_and_block_writes() {
+        let (mut svc, state) = fake_service();
+        state.lock().unwrap().fail_reads = true;
+        svc.subscriptions.enter_viewport("c", "v", vec![EXT_TIME.into()], 0);
+        for now in [0, 1000, 2000] {
+            svc.poll_cycle(now);
+        }
+        assert_eq!(svc.breakers["plc1"].state, StationHealthState::TrippedDegraded);
+        assert!(matches!(
+            svc.write_tag(EXT_TIME, ScalarValue::Number(1.0), "op1", "127.0.0.1"),
+            Err(WriteRejectReason::DeviceOfflineError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_detects_readback_mismatch() {
+        let (mut svc, state) = fake_service();
+        state.lock().unwrap().drift = true;
+        let report = svc.write_batch(vec![write_cmd(EXT_TIME, 1500.0, true)]);
+        let verification = report.verification.expect("標記 verify_batch 應進行校驗");
+        assert_eq!(verification.checked, 1);
+        assert_eq!(verification.mismatches.len(), 1);
+        assert_eq!(verification.mismatches[0].expected, ScalarValue::Number(1500.0));
+        assert_eq!(verification.mismatches[0].actual, ScalarValue::Number(1501.0));
+        assert!(verification.read_errors.is_empty());
+    }
+
+    #[test]
+    fn test_batch_verify_passes_and_is_skipped_without_flag() {
+        let (mut svc, _state) = fake_service();
+        let verified = svc.write_batch(vec![write_cmd(EXT_TIME, 1500.0, true)]);
+        let verification = verified.verification.expect("標記 verify_batch 應進行校驗");
+        assert_eq!(verification.checked, 1);
+        assert!(verification.mismatches.is_empty());
+
+        let plain = svc.write_batch(vec![write_cmd(EXT_TIME, 1600.0, false)]);
+        assert!(plain.verification.is_none());
+        assert!(plain.results.iter().all(|(_, result)| result.is_ok()));
     }
 }
