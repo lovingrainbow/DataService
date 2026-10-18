@@ -24,6 +24,7 @@ pub fn now_ms() -> u64 {
 
 pub mod arbiter;
 pub mod cache;
+pub mod config;
 pub mod gateway;
 pub mod poller;
 pub mod subscription;
@@ -38,6 +39,7 @@ use arbiter::{
 };
 use cache::{DataQuality, DeadbandConfig, TagChangeEvent, TagRouteMeta, TagStore};
 use gateway::{StationCircuitBreaker, StationHealthState};
+use config::ServiceConfig;
 use poller::{CoalescedReadBlock, CoalescingPolicy, MultiRateScheduler, PollReport, RateTier, coalesce_register_blocks};
 use subscription::SubscriptionManager;
 
@@ -113,12 +115,17 @@ pub struct PlcDataService {
 }
 
 impl PlcDataService {
-    /// 由 `ResolvedMachineModel` 與 `service.toml` 覆寫表建構 `PlcDataService` (§3.1 & §3.2)
+    /// 由 `ResolvedMachineModel`、`service.toml` 覆寫表與執行期設定建構 `PlcDataService` (§3.1 & §3.2)
+    ///
+    /// `policy` 與 `config` 須依同一種通訊方式選用（TCP 或 RS-485），避免拼包長度與輪詢間隔不匹配。
+    /// 設定中出現的站點若不在機台模型內，回傳錯誤。
     pub fn from_resolved_model(
         resolved: &ResolvedMachineModel,
         overrides: &[TagOverrideEntry],
         policy: CoalescingPolicy,
-    ) -> (Self, broadcast::Receiver<TagChangeEvent>) {
+        config: &ServiceConfig,
+    ) -> Result<(Self, broadcast::Receiver<TagChangeEvent>), String> {
+        config.validate()?;
         let write_report = evaluate_plc_data_service_writability(resolved, overrides);
         let writable_map: BTreeMap<&str, bool> = write_report
             .items
@@ -140,7 +147,7 @@ impl PlcDataService {
 
             breakers
                 .entry(station_id.clone())
-                .or_insert_with(|| StationCircuitBreaker::new(&station_id, 50));
+                .or_insert_with(|| StationCircuitBreaker::new(&station_id, config.tight_timeout_ms(&station_id)));
 
             let (prefix, idx, bit_opt, _) =
                 parse_universal_plc_address(&eff.address).unwrap_or(("D".into(), 0, None, false));
@@ -202,6 +209,10 @@ impl PlcDataService {
             store.register_tag(route, init_val, init_quality);
         }
 
+        if let Some(station) = config.station_ids().find(|id| !breakers.contains_key(*id)) {
+            return Err(format!("service.toml 的 [station.{station}] 不在機台模型中"));
+        }
+
         info!(
             tag_count = resolved.effective_tags.len(),
             permanent_tag_count = permanent_tags.len(),
@@ -210,7 +221,7 @@ impl PlcDataService {
         );
         let sub_mgr = SubscriptionManager::new(permanent_tags);
 
-        (
+        Ok((
             Self {
                 store,
                 subscriptions: sub_mgr,
@@ -220,11 +231,11 @@ impl PlcDataService {
                 urgent_write_queue: VecDeque::new(),
                 completed_writes: BTreeMap::new(),
                 next_ticket: 1,
-                scheduler: MultiRateScheduler::default(),
+                scheduler: MultiRateScheduler::new(config.poll_rates()),
                 audit_trail: VecDeque::new(),
             },
             rx,
-        )
+        ))
     }
 
     /// 附掛站點驅動；驅動的通訊逾時與站點熔斷器的緊湊逾時 (§7.1) 同步
@@ -613,6 +624,7 @@ impl PlcDataService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poller::PollRatePolicy;
     use machine_model::family::PlcFamily;
     use machine_model::model::{MachineModelBuilder, UnitInstanceBuilder};
     use machine_model::resolver::resolve_machine_model;
@@ -674,7 +686,9 @@ mod tests {
             &resolved,
             &[],
             CoalescingPolicy { max_gap_words: 4, max_block_words: 64 },
-        );
+            &ServiceConfig::default(),
+        )
+        .unwrap();
 
         // 訂閱 D100, D103, D106 (間隙各為 2 Words <= MaxGap 4)
         svc.subscriptions.enter_viewport(
@@ -703,7 +717,9 @@ mod tests {
             &resolved,
             &[],
             CoalescingPolicy::rs485_default(),
-        );
+            &ServiceConfig::default(),
+        )
+        .unwrap();
 
         // 進入視角 t = 1000ms
         svc.subscriptions.enter_viewport(
@@ -733,7 +749,9 @@ mod tests {
             &resolved,
             &[],
             CoalescingPolicy::rs485_default(),
-        );
+            &ServiceConfig::default(),
+        )
+        .unwrap();
 
         // 1. 寫入唯讀輸入 X010 -> 觸發護欄 1 ReadOnlyGuardrail
         let res_ro = svc.write_tag("plc1.X_Cyl1_Ext_LS", ScalarValue::Bool(true), "op1", "127.0.0.1");
@@ -963,7 +981,13 @@ mod tests {
 
     fn fake_service() -> (PlcDataService, Arc<StdMutex<FakeState>>) {
         let resolved = sample_resolved_model();
-        let (mut svc, _rx) = PlcDataService::from_resolved_model(&resolved, &[], CoalescingPolicy::rs485_default());
+        let (mut svc, _rx) = PlcDataService::from_resolved_model(
+            &resolved,
+            &[],
+            CoalescingPolicy::rs485_default(),
+            &ServiceConfig::default(),
+        )
+        .unwrap();
         let state = Arc::new(StdMutex::new(FakeState::default()));
         svc.attach_driver(
             "plc1",
@@ -983,13 +1007,60 @@ mod tests {
     }
 
     #[test]
+    fn test_station_tight_timeout_from_config_reaches_driver() {
+        let resolved = sample_resolved_model();
+        let config = ServiceConfig::from_toml_str("[station.plc1]\ntight_timeout_ms = 80\n").unwrap();
+        let (mut svc, _rx) =
+            PlcDataService::from_resolved_model(&resolved, &[], CoalescingPolicy::rs485_default(), &config).unwrap();
+        assert_eq!(svc.breakers["plc1"].tight_timeout_ms, 80);
+
+        let state = Arc::new(StdMutex::new(FakeState::default()));
+        svc.attach_driver(
+            "plc1",
+            Box::new(FakeDriver {
+                cfg: DriverConfig::default(),
+                state: Arc::clone(&state),
+            }),
+        );
+        assert_eq!(state.lock().unwrap().timeout_ms, 80);
+    }
+
+    #[test]
+    fn test_station_in_config_must_exist_in_model() {
+        let resolved = sample_resolved_model();
+        let config = ServiceConfig::from_toml_str("[station.plc9]\ntight_timeout_ms = 80\n").unwrap();
+        let result = PlcDataService::from_resolved_model(&resolved, &[], CoalescingPolicy::rs485_default(), &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_multi_rate_scheduler_intervals() {
-        let mut sched = MultiRateScheduler::default();
+        let mut sched = MultiRateScheduler::new(PollRatePolicy::tcp_default());
         assert_eq!(sched.due_tiers(0), vec![RateTier::High, RateTier::Normal, RateTier::Low]);
         assert!(sched.due_tiers(49).is_empty());
         assert_eq!(sched.due_tiers(50), vec![RateTier::High]);
         assert_eq!(sched.due_tiers(250), vec![RateTier::High, RateTier::Normal]);
         assert_eq!(sched.due_tiers(1000), vec![RateTier::High, RateTier::Normal, RateTier::Low]);
+    }
+
+    #[test]
+    fn test_multi_rate_scheduler_uses_configured_intervals() {
+        let mut sched = MultiRateScheduler::new(PollRatePolicy::rs485_default());
+        assert_eq!(sched.due_tiers(0), vec![RateTier::High, RateTier::Normal, RateTier::Low]);
+        assert!(sched.due_tiers(50).is_empty());
+        assert_eq!(sched.due_tiers(100), vec![RateTier::High]);
+        assert_eq!(sched.due_tiers(500), vec![RateTier::High, RateTier::Normal]);
+        assert_eq!(sched.due_tiers(2000), vec![RateTier::High, RateTier::Normal, RateTier::Low]);
+    }
+
+    #[test]
+    fn test_poll_rate_policy_validation() {
+        assert!(PollRatePolicy::tcp_default().validate().is_ok());
+        assert!(PollRatePolicy::rs485_default().validate().is_ok());
+        let zero = PollRatePolicy { high_ms: 0, normal_ms: 250, low_ms: 1_000 };
+        assert!(zero.validate().is_err());
+        let inverted = PollRatePolicy { high_ms: 500, normal_ms: 250, low_ms: 1_000 };
+        assert!(inverted.validate().is_err());
     }
 
     #[test]

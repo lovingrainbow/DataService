@@ -4,6 +4,7 @@
 //! - `datasvc-demo`                    規格逐項驗證報告 (DATA_SERVICE_SPEC.md §1 ~ §9)
 //! - `datasvc-demo --interactive`      終端互動 HMI
 //! - `datasvc-demo --serve --port N`   無頭 Daemon，唯讀 HTTP JSON (預設 port 8080)
+//! - `--config <service.toml>`         套用 `[poll]` 速率與 `[station.<id>]` 逾時（互動與 Daemon 模式）
 
 mod daemon;
 mod interactive;
@@ -12,13 +13,14 @@ mod verify;
 
 use std::process::ExitCode;
 
+use plc_data_service::config::ServiceConfig;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("用法: datasvc-demo [--interactive | --serve [--port N]]");
+        println!("用法: datasvc-demo [--interactive | --serve [--port N]] [--config <service.toml>]");
         return ExitCode::SUCCESS;
     }
 
@@ -35,6 +37,14 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    let config = match load_config(&args) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+
     // 日誌輸出到 stderr，避免與報告或互動輸出混在一起；報告與互動預設只顯示警告以上
     let default_filter = if serve {
         "info"
@@ -49,7 +59,14 @@ async fn main() -> ExitCode {
         .init();
 
     if interactive {
-        return match interactive::run(model::build_service()) {
+        let svc = match model::build_service(&config) {
+            Ok(svc) => svc,
+            Err(e) => {
+                eprintln!("service.toml 與機台模型不一致: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        return match interactive::run(svc) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("互動模式錯誤: {e}");
@@ -59,7 +76,14 @@ async fn main() -> ExitCode {
     }
 
     if serve {
-        return match daemon::run(model::build_service(), port).await {
+        let svc = match model::build_service(&config) {
+            Ok(svc) => svc,
+            Err(e) => {
+                eprintln!("service.toml 與機台模型不一致: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        return match daemon::run(svc, port).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("Daemon 錯誤: {e}");
@@ -73,4 +97,14 @@ async fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// 讀取 `--config <path>` 指定的 `service.toml`；未指定時使用預設設定
+fn load_config(args: &[String]) -> Result<ServiceConfig, String> {
+    let Some(pos) = args.iter().position(|a| a == "--config") else {
+        return Ok(ServiceConfig::default());
+    };
+    let path = args.get(pos + 1).ok_or("--config 需要指定 service.toml 路徑")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("無法讀取 {path}: {e}"))?;
+    ServiceConfig::from_toml_str(&text)
 }

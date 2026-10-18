@@ -11,7 +11,7 @@ use plc_data_service::PlcDataService;
 use plc_data_service::arbiter::{PreemptiveWriteCommand, WriteRejectReason};
 use plc_data_service::cache::{DataQuality, DeadbandConfig, TagRouteMeta, TagSnapshot, TagStore};
 use plc_data_service::gateway::{StationCircuitBreaker, StationHealthState};
-use plc_data_service::poller::{CoalescingPolicy, MultiRateScheduler, RateTier, coalesce_register_blocks};
+use plc_data_service::poller::{CoalescingPolicy, MultiRateScheduler, PollRatePolicy, RateTier, coalesce_register_blocks};
 use plc_data_service::subscription::SubscriptionManager;
 
 use crate::model::{STATION_ID, build_service_from, demo_resolved_model};
@@ -529,7 +529,7 @@ fn write_command(tag_id: &str, value: f64, verify_batch: bool) -> PreemptiveWrit
 }
 
 fn check_multi_rate_gating() -> Result<(), String> {
-    let mut sched = MultiRateScheduler::default();
+    let mut sched = MultiRateScheduler::new(PollRatePolicy::tcp_default());
     ensure(sched.due_tiers(0).len() == 3, "首次輪詢時三個速率層都應到期")?;
     ensure(sched.due_tiers(49).is_empty(), "未滿 50ms 時不應有速率層到期")?;
     ensure(sched.due_tiers(50) == vec![RateTier::High], "滿 50ms 時只有 High 層到期")

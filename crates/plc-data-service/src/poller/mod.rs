@@ -5,7 +5,7 @@ pub mod coalescing;
 pub mod scheduler;
 
 pub use coalescing::{CoalescedReadBlock, CoalescingPolicy, coalesce_register_blocks};
-pub use scheduler::{MultiRateScheduler, RateTier};
+pub use scheduler::{MultiRateScheduler, PollRatePolicy, RateTier};
 
 use crate::cache::TagChangeEvent;
 

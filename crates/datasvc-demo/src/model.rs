@@ -7,6 +7,7 @@ use machine_model::resolver::{ResolvedMachineModel, resolve_machine_model};
 use machine_model::unit_type::TypeCatalog;
 use mm_drivers::{DriverConfig, PlcDriver, UniversalPlcDriver};
 use plc_data_service::PlcDataService;
+use plc_data_service::config::ServiceConfig;
 use plc_data_service::poller::CoalescingPolicy;
 
 /// 示範站點 ID（點位 ID 的第一段需與之相同）
@@ -56,9 +57,9 @@ pub fn demo_resolved_model() -> ResolvedMachineModel {
     resolve_machine_model(&mf, &catalog).expect("示範機台模型應可解析")
 }
 
-/// 依機台模型建立服務，並附掛已連線（loopback 模擬）的驅動
-pub fn build_service_from(resolved: &ResolvedMachineModel) -> PlcDataService {
-    let (mut svc, _rx) = PlcDataService::from_resolved_model(resolved, &[], CoalescingPolicy::rs485_default());
+/// 依機台模型與 `service.toml` 設定建構服務，並附掛已連線（loopback 模擬）的驅動
+pub fn build_service_with(resolved: &ResolvedMachineModel, config: &ServiceConfig) -> Result<PlcDataService, String> {
+    let (mut svc, _rx) = PlcDataService::from_resolved_model(resolved, &[], CoalescingPolicy::rs485_default(), config)?;
     let cfg = DriverConfig {
         id: STATION_ID.into(),
         ..DriverConfig::default()
@@ -66,9 +67,15 @@ pub fn build_service_from(resolved: &ResolvedMachineModel) -> PlcDataService {
     let mut driver = UniversalPlcDriver::new(cfg.clone());
     driver.connect(cfg).expect("loopback 模擬連線應成功");
     svc.attach_driver(STATION_ID, Box::new(driver));
-    svc
+    Ok(svc)
 }
 
-pub fn build_service() -> PlcDataService {
-    build_service_from(&demo_resolved_model())
+/// 使用預設設定建構服務（驗證報告使用）
+pub fn build_service_from(resolved: &ResolvedMachineModel) -> PlcDataService {
+    build_service_with(resolved, &ServiceConfig::default()).expect("預設設定應可套用於示範模型")
+}
+
+/// 使用指定的 `service.toml` 設定建構示範服務（互動與 Daemon 模式）
+pub fn build_service(config: &ServiceConfig) -> Result<PlcDataService, String> {
+    build_service_with(&demo_resolved_model(), config)
 }
